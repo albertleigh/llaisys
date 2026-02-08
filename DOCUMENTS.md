@@ -26,5 +26,9 @@ or
     xmake
     xmake install
 
+### Install if needed
+pip install -U "huggingface_hub[cli]"
 
+### Download the model
+hf download deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --local-dir ./models/DeepSeek-R1-Distill-Qwen-1.5B
 
