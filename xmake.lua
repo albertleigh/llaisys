@@ -108,15 +108,20 @@ target("llaisys")
     add_files("src/llaisys/*.cc")
     set_installdir(".")
 
+    if is_mode("debug") then
+        set_symbols("debug")
+        set_optimize("none")
+        add_defines("DEBUG")
+    end
     
     after_install(function (target)
         -- copy shared library to python package
-        print("Copying llaisys to python/llaisys/libllaisys/ ..")
+        print("Copying llaisys to .venv/lib/python3.12/site-packages/llaisys/libllaisys ..")
         if is_plat("windows") then
             os.cp("bin/*.dll", "python/llaisys/libllaisys/")
         end
         if is_plat("linux") then
-            os.cp("lib/*.so", "python/llaisys/libllaisys/")
+            os.cp("lib/*.so", ".venv/lib/python3.12/site-packages/llaisys/libllaisys")
         end
     end)
 target_end()

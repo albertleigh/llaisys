@@ -2,11 +2,14 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <string>
+// #include "../../utils/debugger.hpp"
 
 namespace llaisys::device::cpu {
 
 namespace runtime_api {
 int getDeviceCount() {
+    // debugger::waitForDebugger();
     return 1;
 }
 
