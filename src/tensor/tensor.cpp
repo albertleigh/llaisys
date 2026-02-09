@@ -164,7 +164,7 @@ void Tensor::debug() const {
 }
 
 bool Tensor::isContiguous() const {
-    size_t ndim = this->ndim();
+    int ndim = static_cast<int>(this->ndim());
     if (ndim == 0) {
         return true;
     }

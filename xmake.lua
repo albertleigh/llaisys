@@ -115,13 +115,34 @@ target("llaisys")
     end
     
     after_install(function (target)
-        -- copy shared library to python package
-        print("Copying llaisys to .venv/lib/python3.12/site-packages/llaisys/libllaisys ..")
-        if is_plat("windows") then
-            os.cp("bin/*.dll", "python/llaisys/libllaisys/")
+        local venv = os.getenv("VIRTUAL_ENV")
+        if not venv then
+            -- copy shared library to python package
+            print("Copying llaisys to python/llaisys/libllaisys/ ..")
+            if is_plat("windows") then
+                os.cp("bin/*.dll", "python/llaisys/libllaisys/")
+            end
+            if is_plat("linux") then
+                os.cp("lib/*.so", "python/llaisys/libllaisys/")
+            end
+            return
         end
-        if is_plat("linux") then
-            os.cp("lib/*.so", ".venv/lib/python3.12/site-packages/llaisys/libllaisys")
+        
+        -- Get Python version
+        local python_version = os.iorun("python -c \"import sys; print(f'python{sys.version_info.major}.{sys.version_info.minor}')\"")
+        python_version = python_version:trim()
+        
+        print("Copying llaisys to virtual environment: " .. venv)
+        print("Python version detected: " .. python_version)
+        
+        if is_plat("windows") then
+            local dest = path.join(venv, "Lib", "site-packages/llaisys/libllaisys")
+            print("Destination: " .. dest)
+            os.cp("bin/*.dll", dest)
+        elseif is_plat("linux") then
+            local dest = path.join(venv, "lib", python_version, "site-packages/llaisys/libllaisys")
+            print("Destination: " .. dest)
+            os.cp("lib/*.so", dest)
         end
     end)
 target_end()
