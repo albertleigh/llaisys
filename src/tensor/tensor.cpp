@@ -1,5 +1,6 @@
 #include "tensor.hpp"
 
+#include "../ops/rearrange/op.hpp"
 #include "../utils.hpp"
 
 #include <cstring>
@@ -267,13 +268,21 @@ void Tensor::load(const void *src_) {
 }
 
 tensor_t Tensor::contiguous() const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    if (isContiguous()) {
+        return std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset));
+    }
+
+    ASSERT(this->deviceType() == LLAISYS_DEVICE_CPU, "Only CPU tensor can be contiguous");
+    auto result = Tensor::create(this->shape(), this->dtype(), this->deviceType(), this->deviceId());
+    ops::rearrange(result, std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset)));
+    return result;
 }
 
 tensor_t Tensor::reshape(const std::vector<size_t> &shape) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    if (isContiguous()) {
+        return view(shape);
+    }
+    return contiguous()->view(shape);
 }
 
 tensor_t Tensor::to(llaisysDeviceType_t device_type, int device) const {
