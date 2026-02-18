@@ -1,6 +1,10 @@
 add_rules("mode.debug", "mode.release")
 set_encodings("utf-8")
 
+-- Use vcpkg manifest mode (vcpkg.json)
+-- Dependencies are automatically managed by vcpkg manifest
+set_policy("package.requires_lock", true)
+
 add_includedirs("include")
 
 -- CPU --
@@ -109,12 +113,30 @@ target("llaisys")
     add_files("src/llaisys/models/*.cc")
     set_installdir(".")
 
-    -- Add OpenMP linker flags for parallel operations
+    -- Add OpenBLAS linking for all platforms
+    local vcpkg_root = os.getenv("VCPKG_ROOT") or (is_plat("windows") and "C:/opt/vcpkg" or "~/opt/vcpkg")
+
     if not is_plat("windows") then
+        -- Linux/Unix specific settings
         add_ldflags("-fopenmp")
         add_syslinks("gomp")  -- Link against OpenMP runtime library
+
+        add_linkdirs(path.join(vcpkg_root, "installed/x64-linux/lib"))
+
+        -- Force link entire OpenBLAS static library
+        add_ldflags("-Wl,--whole-archive")
+        add_links("openblas")
+        add_ldflags("-Wl,--no-whole-archive")
+
+        add_syslinks("pthread", "gfortran")  -- OpenBLAS dependencies
     else
+        -- Windows specific settings
         add_ldflags("/openmp")
+
+        add_linkdirs(path.join(vcpkg_root, "installed/x64-windows/lib"))
+
+        -- Link OpenBLAS static library
+        add_links("openblas")
     end
 
     if is_mode("debug") then

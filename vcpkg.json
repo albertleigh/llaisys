@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "llaisys",
+  "version": "0.1.0",
+  "description": "LLAISYS - A lightweight AI system with optimized CPU operators",
+  "homepage": "https://github.com/yourusername/llaisys",
+  "license": "MIT",
+  "dependencies": [
+    {
+      "name": "openblas",
+      "version>=": "0.3.29",
+      "features": ["threads"],
+      "platform": "!uwp"
+    }
+  ],
+  "builtin-baseline": "2024.11.16",
+  "overrides": []
+}
+
+

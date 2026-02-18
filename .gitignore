@@ -27,6 +27,7 @@ cache/
 
 # JSON
 *.json
+!vcpkg.json
 
 #GGUF
 *.gguf

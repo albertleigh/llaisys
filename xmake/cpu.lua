@@ -16,14 +16,23 @@ target("llaisys-ops-cpu")
     add_deps("llaisys-tensor")
     set_languages("cxx17")
     set_warnings("all", "error")
+
+    -- Add OpenMP support for parallelization
     if not is_plat("windows") then
         add_cxflags("-fPIC", "-Wno-unknown-pragmas")
-        -- Add OpenMP support for parallelization
         add_cxflags("-fopenmp")
         add_ldflags("-fopenmp")
     else
         add_cxflags("/openmp")
     end
+
+    -- Add OpenBLAS from vcpkg (cross-platform)
+    local vcpkg_root = os.getenv("VCPKG_ROOT") or (is_plat("windows") and "C:/opt/vcpkg" or "~/opt/vcpkg")
+    local triplet = is_plat("windows") and "x64-windows" or "x64-linux"
+
+    add_includedirs(path.join(vcpkg_root, "installed", triplet, "include"))
+    add_linkdirs(path.join(vcpkg_root, "installed", triplet, "lib"))
+    add_links("openblas")
 
     add_files("../src/ops/*/cpu/*.cpp")
 
