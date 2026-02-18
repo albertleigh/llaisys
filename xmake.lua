@@ -109,6 +109,14 @@ target("llaisys")
     add_files("src/llaisys/models/*.cc")
     set_installdir(".")
 
+    -- Add OpenMP linker flags for parallel operations
+    if not is_plat("windows") then
+        add_ldflags("-fopenmp")
+        add_syslinks("gomp")  -- Link against OpenMP runtime library
+    else
+        add_ldflags("/openmp")
+    end
+
     if is_mode("debug") then
         set_symbols("debug")
         set_optimize("none")
