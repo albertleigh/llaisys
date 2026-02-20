@@ -11,6 +11,13 @@ target("llaisys-device-cpu")
     on_install(function (target) end)
 target_end()
 
+-- Intel MKL option
+option("mkl")
+    set_default(true)
+    set_showmenu(true)
+    set_description("Use Intel MKL instead of OpenBLAS for BLAS operations")
+option_end()
+
 target("llaisys-ops-cpu")
     set_kind("static")
     add_deps("llaisys-tensor")
@@ -26,13 +33,21 @@ target("llaisys-ops-cpu")
         add_cxflags("/openmp")
     end
 
-    -- Add OpenBLAS from vcpkg (cross-platform)
-    local vcpkg_root = os.getenv("VCPKG_ROOT") or (is_plat("windows") and "C:/opt/vcpkg" or "~/opt/vcpkg")
-    local triplet = is_plat("windows") and "x64-windows" or "x64-linux"
+    if has_config("mkl") then
+        -- Intel MKL (preferred when available)
+        local mkl_root = os.getenv("MKLROOT") or "/opt/intel/oneapi/mkl/latest"
+        add_defines("ENABLE_MKL")
+        add_includedirs(path.join(mkl_root, "include"))
+        add_linkdirs(path.join(mkl_root, "lib", "intel64"))
+    else
+        -- Fallback to OpenBLAS from vcpkg
+        local vcpkg_root = os.getenv("VCPKG_ROOT") or (is_plat("windows") and "C:/opt/vcpkg" or "~/opt/vcpkg")
+        local triplet = is_plat("windows") and "x64-windows" or "x64-linux"
 
-    add_includedirs(path.join(vcpkg_root, "installed", triplet, "include"))
-    add_linkdirs(path.join(vcpkg_root, "installed", triplet, "lib"))
-    add_links("openblas")
+        add_includedirs(path.join(vcpkg_root, "installed", triplet, "include"))
+        add_linkdirs(path.join(vcpkg_root, "installed", triplet, "lib"))
+        add_links("openblas")
+    end
 
     add_files("../src/ops/*/cpu/*.cpp")
 

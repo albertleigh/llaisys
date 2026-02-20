@@ -113,30 +113,49 @@ target("llaisys")
     add_files("src/llaisys/models/*.cc")
     set_installdir(".")
 
-    -- Add OpenBLAS linking for all platforms
-    local vcpkg_root = os.getenv("VCPKG_ROOT") or (is_plat("windows") and "C:/opt/vcpkg" or "~/opt/vcpkg")
+    -- BLAS linking
+    if has_config("mkl") then
+        -- Intel MKL linking
+        local mkl_root = os.getenv("MKLROOT") or "/opt/intel/oneapi/mkl/latest"
+        local mkl_lib = path.join(mkl_root, "lib", "intel64")
 
-    if not is_plat("windows") then
-        -- Linux/Unix specific settings
-        add_ldflags("-fopenmp")
-        add_syslinks("gomp")  -- Link against OpenMP runtime library
+        if not is_plat("windows") then
+            add_ldflags("-fopenmp")
+            add_syslinks("gomp")
 
-        add_linkdirs(path.join(vcpkg_root, "installed/x64-linux/lib"))
+            add_linkdirs(mkl_lib)
+            add_rpathdirs(mkl_lib)
 
-        -- Force link entire OpenBLAS static library
-        add_ldflags("-Wl,--whole-archive")
-        add_links("openblas")
-        add_ldflags("-Wl,--no-whole-archive")
+            -- MKL link line: lp64 + gnu_thread + core (for GCC with OpenMP threading)
+            -- Use --no-as-needed to force NEEDED entries for MKL shared libs
+            add_shflags("-Wl,--no-as-needed", "-lmkl_intel_lp64", "-lmkl_gnu_thread", "-lmkl_core", "-Wl,--as-needed", {force = true})
 
-        add_syslinks("pthread", "gfortran")  -- OpenBLAS dependencies
+            add_syslinks("pthread", "m", "dl")
+        else
+            add_ldflags("/openmp")
+            add_linkdirs(path.join(mkl_root, "lib"))
+            add_links("mkl_intel_lp64", "mkl_intel_thread", "mkl_core")
+        end
     else
-        -- Windows specific settings
-        add_ldflags("/openmp")
+        -- OpenBLAS linking (fallback)
+        local vcpkg_root = os.getenv("VCPKG_ROOT") or (is_plat("windows") and "C:/opt/vcpkg" or "~/opt/vcpkg")
 
-        add_linkdirs(path.join(vcpkg_root, "installed/x64-windows/lib"))
+        if not is_plat("windows") then
+            add_ldflags("-fopenmp")
+            add_syslinks("gomp")
 
-        -- Link OpenBLAS static library
-        add_links("openblas")
+            add_linkdirs(path.join(vcpkg_root, "installed/x64-linux/lib"))
+
+            add_ldflags("-Wl,--whole-archive")
+            add_links("openblas")
+            add_ldflags("-Wl,--no-whole-archive")
+
+            add_syslinks("pthread", "gfortran")
+        else
+            add_ldflags("/openmp")
+            add_linkdirs(path.join(vcpkg_root, "installed/x64-windows/lib"))
+            add_links("openblas")
+        end
     end
 
     if is_mode("debug") then

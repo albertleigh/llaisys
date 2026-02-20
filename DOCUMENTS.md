@@ -6,6 +6,16 @@
 or 
 - xmake p -k compdb
 
+## Install Intel oneAPI MKL
+https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html
+
+## Setup Build
+    xmake f --menu
+    xmake f --mkl=y
+    xmake f --toolchain=clang
+    xmake f -v
+    xmake config
+
 ### Clean Build
     xmake clean
     xmake
