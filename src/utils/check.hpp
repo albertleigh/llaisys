@@ -1,4 +1,3 @@
-#include <iostream>
 #include <stdexcept>
 
 #define EXCEPTION_LOCATION_MSG \
@@ -92,3 +91,14 @@
         std::cerr << "[ERROR] Invalid argument: " << MSG__ << EXCEPTION_LOCATION_MSG << '\n'; \
         throw std::invalid_argument(MSG__);                                                   \
     } while (0)
+
+#ifdef ENABLE_NVIDIA_API
+#define CUDA_CHECK(call)                                                                                                \
+    do {                                                                                                                \
+        cudaError_t error = call;                                                                                       \
+        if (error != cudaSuccess) {                                                                                     \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << " - " << cudaGetErrorString(error) << "\n"; \
+            throw std::runtime_error(cudaGetErrorString(error));                                                          \
+        }                                                                                                               \
+    } while (0)
+#endif

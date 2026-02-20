@@ -41,6 +41,9 @@ target("llaisys-device")
     set_kind("static")
     add_deps("llaisys-utils")
     add_deps("llaisys-device-cpu")
+    if has_config("nv-gpu") then
+        add_deps("llaisys-device-nvidia")
+    end
 
     set_languages("cxx17")
     set_warnings("all", "error")
@@ -87,6 +90,9 @@ target_end()
 target("llaisys-ops")
     set_kind("static")
     add_deps("llaisys-ops-cpu")
+    if has_config("nv-gpu") then
+        add_deps("llaisys-ops-cuda")
+    end
 
     set_languages("cxx17")
     set_warnings("all", "error")
@@ -112,6 +118,46 @@ target("llaisys")
     add_files("src/llaisys/*.cc")
     add_files("src/llaisys/models/*.cc")
     set_installdir(".")
+
+    -- CUDA device linking: required so nvcc performs the final device-code link
+    -- when static libs containing .cu objects are linked into this shared library
+    if has_config("nv-gpu") then
+        add_rules("cuda")
+        add_cugencodes("native")
+
+        before_link(function (target)
+            import("lib.detect.find_tool")
+            local nvcc = find_tool("nvcc")
+            if not nvcc then
+                raise("nvcc not found!")
+            end
+
+            -- Collect all .cu.o files from CUDA static lib dependencies
+            local cu_objects = {}
+            for _, dep in ipairs(target:orderdeps()) do
+                for _, obj in ipairs(dep:objectfiles()) do
+                    if obj:match("%.cu%.o$") then
+                        table.insert(cu_objects, obj)
+                    end
+                end
+            end
+
+            if #cu_objects > 0 then
+                local dlink_obj = path.join(target:objectdir(), "cuda_dlink.o")
+                local argv = {"-dlink", "-shared",
+                              "-gencode", "arch=compute_86,code=sm_86",
+                              "-o", dlink_obj}
+                for _, obj in ipairs(cu_objects) do
+                    table.insert(argv, obj)
+                end
+                os.vrunv(nvcc.program, argv)
+                -- Insert device-link object at the front so g++ includes it
+                local objs = target:objectfiles()
+                table.insert(objs, 1, dlink_obj)
+                target:set("objectfiles", objs)
+            end
+        end)
+    end
 
     -- BLAS linking
     if has_config("mkl") then
@@ -162,6 +208,15 @@ target("llaisys")
         set_symbols("debug")
         set_optimize("none")
         add_defines("DEBUG")
+        -- CUDA line info for debug profiling
+        if has_config("nv-gpu") then
+            add_cuflags("-G", "-lineinfo", "-g", {force = true})
+        end
+    end
+
+    -- CUDA runtime linking
+    if has_config("nv-gpu") then
+        add_links("cudart")
     end
     
     after_install(function (target)

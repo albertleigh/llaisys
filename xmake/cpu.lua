@@ -13,7 +13,7 @@ target_end()
 
 -- Intel MKL option
 option("mkl")
-    set_default(true)
+    set_default(false)
     set_showmenu(true)
     set_description("Use Intel MKL instead of OpenBLAS for BLAS operations")
 option_end()

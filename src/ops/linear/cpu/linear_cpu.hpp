@@ -8,4 +8,4 @@
 #pragma once
 namespace llaisys::ops::cpu {
 void linear(std::byte *out, const std::byte *in, const std::byte *weight, const std::byte *bias, llaisysDataType_t dtype, std::array<size_t, 3> dims);
-}
+} // namespace llaisys::ops::cpu

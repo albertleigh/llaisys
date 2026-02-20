@@ -59,6 +59,9 @@ cd python && pip install -e .
 
 python test/test_runtime.py --model [dir_path/to/model] --device nvidia
 python test/test_runtime.py --device cpu
+python test/test_runtime.py --device nvidia
+
+python test/ops/add.py --device nvidia
 
 python test/test_infer.py --model [dir_path/to/model] --test --device nvidia
 python test/test_infer.py --device cpu --model ./models/DeepSeek-R1-Distill-Qwen-1.5B
