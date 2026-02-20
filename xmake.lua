@@ -217,6 +217,7 @@ target("llaisys")
     -- CUDA runtime linking
     if has_config("nv-gpu") then
         add_links("cudart")
+        add_links("cublas")
     end
     
     after_install(function (target)

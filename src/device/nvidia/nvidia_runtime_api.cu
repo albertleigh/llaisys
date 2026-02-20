@@ -1,4 +1,5 @@
 #include "../../utils.hpp"
+#include "../../cuda_utils/check.cuh"
 #include "../runtime_api.hpp"
 
 #include <cuda_runtime.h>

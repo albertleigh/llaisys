@@ -44,6 +44,7 @@ target("llaisys-ops-cuda")
         add_cuflags("--compiler-options", "-fPIC", {force = true})
     end
 
+    add_files("../src/cuda_utils/*.cu")
     add_files("../src/ops/*/cuda/*.cu")
 
     -- Debug-friendly flags for CUDA

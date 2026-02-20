@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include "../../../utils.hpp"
+#include "../../../cuda_utils/check.cuh"
 
 namespace {
 
