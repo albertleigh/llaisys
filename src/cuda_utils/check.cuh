@@ -4,9 +4,11 @@
 
 #pragma once
 #include <cstdio>
+#include <cuda.h>
 #include <cuda_runtime.h>
+#include <iostream>
+#include <stdexcept>
 
-#ifdef ENABLE_NVIDIA_API
 #define CUDA_CHECK(call)                                                                                                \
     do {                                                                                                                \
         cudaError_t error = call;                                                                                       \
@@ -27,4 +29,37 @@
             ptr = nullptr;                                                                                                       \
         }                                                                                                                        \
     } while (0)
-#endif
+namespace llaisys::utils::cuda {
+// ── cached device properties ────────────────────────────────────────────────
+struct DeviceInfo {
+    unsigned int warp_size;
+    unsigned int max_block;
+    int sm_count;
+    bool valid = false;
+    int device_id = -1;
+
+    void refresh() {
+        int dev = 0;
+        CUDA_CHECK(cudaGetDevice(&dev));
+        if (valid && dev == device_id) {
+            return;
+        }
+
+        cudaDeviceProp props{};
+        CUDA_CHECK(cudaGetDeviceProperties(&props, dev));
+        warp_size = static_cast<unsigned int>(props.warpSize);
+        max_block = static_cast<unsigned int>(props.maxThreadsPerBlock);
+        if (max_block > 1024) {
+            max_block = 1024;
+        }
+        sm_count = props.multiProcessorCount;
+        device_id = dev;
+        valid = true;
+    }
+};
+
+inline DeviceInfo &get_device_info() {
+    static DeviceInfo info;
+    return info;
+}
+} // namespace llaisys::utils::cuda

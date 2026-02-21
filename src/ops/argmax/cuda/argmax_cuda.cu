@@ -4,7 +4,6 @@
 
 #include "argmax_cuda.cuh"
 
-#include <cstdio>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -14,10 +13,7 @@
 #include "../../../cuda_utils/types.cuh"
 #include "../../../utils.hpp"
 
-#include <bits/fs_fwd.h>
-
 namespace {
-using llaisys::utils::cuda::to_float;
 
 // ── warp-level argmax reduction via shuffle ──────────────────────────────────
 // Reduces (val, idx) pairs across a warp.  The lane with the largest value
@@ -39,334 +35,308 @@ __device__ __forceinline__ void warp_argmax_reduce(T &out_val, size_t &out_idx, 
     out_idx = local_idx;
 }
 
-// ── first pass: per-block argmax with warp-shuffle reduction ────────────────
-// Each block reduces its chunk to a single (index, value) pair.
-// Uses dynamic shared memory: float smem_val[] followed by size_t smem_idx[].
+// ── block-level argmax: warp reduce → shared memory → final warp reduce ─────
 template <typename T>
-__global__ void argmax_shuffle_first_pass(size_t *intermediate_idx, T *intermediate_val,
-                                          const T *vals, size_t numel,
-                                          unsigned int warp_size) {
-    extern __shared__ std::byte shared_mem[];
+__device__ __forceinline__ void block_argmax_reduce(T &out_val, size_t &out_idx,
+                                                    T local_val, size_t local_idx,
+                                                    unsigned int warp_size,
+                                                    T *smem_val, size_t *smem_idx) {
+    const unsigned int tid = threadIdx.x;
     const unsigned int num_warps = (blockDim.x + warp_size - 1) / warp_size;
-    size_t *sidx = reinterpret_cast<size_t *>(shared_mem);
-    T *smem = reinterpret_cast<T *>(shared_mem + num_warps * sizeof(size_t));
 
-    const size_t tid = threadIdx.x;
-    const size_t idx = blockIdx.x * blockDim.x + tid;
-
-    T local_max_value = vals[idx];
-    size_t local_max_idx = idx;
-
-    for (size_t i = idx; i < numel; i += blockDim.x * gridDim.x) {
-        if (vals[i] > local_max_value || (vals[i] == local_max_value && i < local_max_idx)) {
-            local_max_value = vals[i];
-            local_max_idx = i;
-        }
-    }
-
-    T reduced_max_value = vals[idx];
-    size_t reduced_max_idx = idx;
-
-    warp_argmax_reduce(reduced_max_value, reduced_max_idx, local_max_value, local_max_idx, warp_size);
+    T reduced_val;
+    size_t reduced_idx;
+    warp_argmax_reduce(reduced_val, reduced_idx, local_val, local_idx, warp_size);
 
     if (tid % warp_size == 0) {
-        smem[tid / warp_size] = reduced_max_value;
-        sidx[tid / warp_size] = reduced_max_idx;
+        smem_val[tid / warp_size] = reduced_val;
+        smem_idx[tid / warp_size] = reduced_idx;
     }
 
     __syncthreads();
 
     if (tid < warp_size) {
-        bool tid_of_valid_smem_value = tid < (blockDim.x + warp_size - 1) / warp_size;
-        T block_max_value = tid_of_valid_smem_value ? smem[tid] : T(-__FLT_MAX__);
-        size_t block_max_idx = tid_of_valid_smem_value ? sidx[tid] : ~size_t(0);
-        // The magic relies on a specific property of current GPU architectures: The maximum number of threads in a block is
-        // 1024. 1024 / 32 = 32, which means at most 32 warps in a block. therefore, we can directly use warp_reduce here to
-        // reduce within a warp.
-        warp_argmax_reduce(reduced_max_value, reduced_max_idx, block_max_value, block_max_idx, warp_size);
-        if (tid == 0) {
-            intermediate_idx[blockIdx.x] = reduced_max_idx;
-            intermediate_val[blockIdx.x] = reduced_max_value;
-        }
+        bool valid = tid < num_warps;
+        T block_val = valid ? smem_val[tid] : T(-__FLT_MAX__);
+        size_t block_idx = valid ? smem_idx[tid] : ~size_t(0);
+        warp_argmax_reduce(out_val, out_idx, block_val, block_idx, warp_size);
     }
 }
 
-// ── second pass: reduce block winners (single block) ────────────────────────
+// ── single-block kernel: processes entire input, no intermediate storage ────
 template <typename T>
-__global__ void argmax_shuffle_second_pass(size_t *out_idx, T *out_val,
-                                           const size_t *intermediate_idx,
-                                           const T *intermediate_val,
-                                           const size_t num_blocks,
-                                           unsigned int warp_size) {
+__global__ void argmax_single_block(size_t *out_idx, T *out_val,
+                                    const T *vals, size_t numel,
+                                    unsigned int warp_size) {
     extern __shared__ std::byte shared_mem[];
     const unsigned int num_warps = (blockDim.x + warp_size - 1) / warp_size;
     size_t *sidx = reinterpret_cast<size_t *>(shared_mem);
-    T *smem = reinterpret_cast<T *>(shared_mem + num_warps * sizeof(size_t));
+    T *sval = reinterpret_cast<T *>(shared_mem + num_warps * sizeof(size_t));
 
     const size_t tid = threadIdx.x;
-    const size_t idx = blockIdx.x * blockDim.x + tid;
 
-    T local_max_value = -__FLT_MAX__;
+    T local_max_value = T(-__FLT_MAX__);
     size_t local_max_idx = ~size_t(0);
 
-    for (size_t i = idx; i < num_blocks; i += blockDim.x) {
-        if (intermediate_val[i] > local_max_value || (intermediate_val[i] == local_max_value && i < local_max_idx)) {
-            local_max_value = intermediate_val[i];
+    for (size_t i = tid; i < numel; i += blockDim.x) {
+        T v = vals[i];
+        if (v > local_max_value || (v == local_max_value && i < local_max_idx)) {
+            local_max_value = v;
             local_max_idx = i;
         }
     }
 
-    T reduced_max_value;
-    size_t reduced_max_idx;
+    T result_val;
+    size_t result_idx;
+    block_argmax_reduce(result_val, result_idx, local_max_value, local_max_idx, warp_size, sval, sidx);
 
-    warp_argmax_reduce(reduced_max_value, reduced_max_idx, local_max_value, local_max_idx, warp_size);
+    if (tid == 0) {
+        *out_idx = result_idx;
+        *out_val = result_val;
+    }
+}
 
-    if (tid % warp_size == 0) {
-        smem[tid / warp_size] = reduced_max_value;
-        sidx[tid / warp_size] = reduced_max_idx;
+// ── single-pass multi-block kernel (threadfence / last-block reduction) ─────
+// Each block reduces its portion, writes to intermediate arrays, then uses
+// __threadfence() + atomicInc to detect the last block.  The last block
+// performs the final cross-block reduction — all in ONE kernel launch.
+// This avoids the second kernel launch and its associated overhead.
+template <typename T>
+__global__ void argmax_lastblock(size_t *out_idx, T *out_val,
+                                 const T *vals, size_t numel,
+                                 size_t *inter_idx, T *inter_val,
+                                 unsigned int *block_counter,
+                                 unsigned int warp_size) {
+    extern __shared__ std::byte shared_mem[];
+    const unsigned int num_warps = (blockDim.x + warp_size - 1) / warp_size;
+    size_t *sidx = reinterpret_cast<size_t *>(shared_mem);
+    T *sval = reinterpret_cast<T *>(shared_mem + num_warps * sizeof(size_t));
+    // last bool lives right after the smem arrays
+    bool *is_last_block = reinterpret_cast<bool *>(shared_mem + num_warps * (sizeof(size_t) + sizeof(T)));
+
+    const size_t tid = threadIdx.x;
+    const size_t global_idx = blockIdx.x * blockDim.x + tid;
+
+    // ── Phase 1: each block reduces its grid-strided chunk ──────────────────
+    T local_max_value = T(-__FLT_MAX__);
+    size_t local_max_idx = ~size_t(0);
+
+    for (size_t i = global_idx; i < numel; i += blockDim.x * gridDim.x) {
+        T v = vals[i];
+        if (v > local_max_value || (v == local_max_value && i < local_max_idx)) {
+            local_max_value = v;
+            local_max_idx = i;
+        }
+    }
+
+    T block_val;
+    size_t block_idx;
+    block_argmax_reduce(block_val, block_idx, local_max_value, local_max_idx, warp_size, sval, sidx);
+
+    if (tid == 0) {
+        inter_val[blockIdx.x] = block_val;
+        inter_idx[blockIdx.x] = block_idx;
+
+        // Ensure writes are globally visible before signaling
+        __threadfence();
+
+        // atomicInc wraps to 0 when value == gridDim.x - 1
+        unsigned int ticket = atomicInc(block_counter, gridDim.x - 1);
+        *is_last_block = (ticket == gridDim.x - 1);
     }
 
     __syncthreads();
 
-    if (tid < warp_size) {
-        bool tid_of_valid_smem_value = tid < (blockDim.x + warp_size - 1) / warp_size;
-        T block_max_value = tid_of_valid_smem_value ? smem[tid] : T(-__FLT_MAX__);
-        size_t block_max_idx = tid_of_valid_smem_value ? sidx[tid] : ~size_t(0);
-        // The magic relies on a specific property of current GPU architectures: The maximum number of threads in a block is
-        // 1024. 1024 / 32 = 32, which means at most 32 warps in a block. therefore, we can directly use warp_reduce here to
-        // reduce within a warp.
-        warp_argmax_reduce(reduced_max_value, reduced_max_idx, block_max_value, block_max_idx, warp_size);
-        if (tid == 0) {
-            *out_idx = reduced_max_idx;
-            *out_val = reduced_max_value;
-        }
-    }
-}
+    // ── Phase 2: last block reduces all intermediate results ────────────────
+    if (*is_last_block) {
+        T final_val = T(-__FLT_MAX__);
+        size_t final_idx = ~size_t(0);
 
-// ── typed launcher ──────────────────────────────────────────────────────────
-template <typename T>
-void launch_argmax_shuffle(size_t *out_idx, T *out_val, const T *vals, size_t numel,
-                           dim3 grid, dim3 block, unsigned int warp_size) {
-    T *d_intermediate_val;
-    size_t *d_intermediate_idx;
-    CUDA_CHECK(cudaMalloc(&d_intermediate_val, grid.x * sizeof(T)));
-    CUDA_CHECK(cudaMalloc(&d_intermediate_idx, grid.x * sizeof(size_t)));
-
-    // First pass: reduce within blocks
-    size_t smem_size = (block.x + warp_size - 1) / warp_size * (sizeof(T) + sizeof(size_t));
-    argmax_shuffle_first_pass<<<grid, block, smem_size>>>(d_intermediate_idx, d_intermediate_val, vals, numel, warp_size);
-    CUDA_CHECK(cudaGetLastError());
-
-    // Second pass: reduce block results
-    dim3 grid2(1);
-    // When there were not that many reduced intermediate_val of size grid, we need not to lauch that many block.x
-    dim3 block2(min(grid.x, block.x));
-    size_t smem_size2 = (block2.x + warp_size - 1) / warp_size * (sizeof(T) + sizeof(size_t));
-    argmax_shuffle_second_pass<<<grid2, block2, smem_size2>>>(out_idx, out_val, d_intermediate_idx, d_intermediate_val, grid.x, warp_size);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaFree(d_intermediate_val));
-    CUDA_CHECK(cudaFree(d_intermediate_idx));
-}
-
-#if defined(CUDA_VERSION) && (CUDA_VERSION >= 900)
-template <typename T>
-__global__ void launch_argmax_cooperatively(size_t *out_idx, T *out_val, const T *vals, size_t numel, unsigned int wrap_size) {
-    // (block.x + wrap_size - 1) / wrap_size * (dsize(dtype) + sizeof(size_t))
-    extern __shared__ std::byte shared_mem[];
-    const unsigned int num_warps = (block.x + wrap_size - 1) / wrap_size;
-    size_t *coop_sidx = reinterpret_cast<size_t *>(shared_mem);
-    T *coop_smem = reinterpret_cast<T *>(shared_mem + num_warps * sizeof(size_t));
-
-    cg::grid_group grid = cg::this_grid();
-    // Replace with __syncthreads
-    cg::thread_block block = cg::this_thread_block();
-    size_t tid = threadIdx.x;
-    size_t idx = blockIdx.x * blockDim.x + tid;
-
-    T local_max_value = vals[idx];
-    size_t local_max_idx = idx;
-
-    for (size_t i = idx; i < numel; i += blockDim.x * gridDim.x) {
-        if (vals[i] > local_max_value || (vals[i] == local_max_value && i < local_max_idx)) {
-            local_max_value = vals[i];
-            local_max_idx = i;
-        }
-    }
-
-    T reduced_max_value = vals[idx];
-    size_t reduced_max_idx = idx;
-
-    warp_argmax_reduce(reduced_max_value, reduced_max_idx, local_max_value, local_max_idx, warp_size);
-
-    if (tid % warp_size == 0) {
-        coop_smem[tid / warp_size] = reduced_max_value;
-        coop_sidx[tid / warp_size] = reduced_max_idx;
-    }
-
-    block.sync();
-    // __syncthreads();  // equivalent to block.sync()
-
-    if (tid < warp_size) {
-        bool tid_of_valid_smem_value = tid < (blockDim.x + warp_size - 1) / warp_size;
-        T block_max_value = tid_of_valid_smem_value ? coop_smem[tid] : T(-__FLT_MAX__);
-        size_t block_max_idx = tid_of_valid_smem_value ? coop_sidx[tid] : ~size_t(0);
-        // The magic relies on a specific property of current GPU architectures: The maximum number of threads in a block is
-        // 1024. 1024 / 32 = 32, which means at most 32 warps in a block. therefore, we can directly use warp_reduce here to
-        // reduce within a warp.
-        warp_argmax_reduce(reduced_max_value, reduced_max_idx, block_max_value, block_max_idx, warp_size);
-        if (tid == 0) {
-            out_idx[blockIdx.x] = reduced_max_idx;
-            out_val[blockIdx.x] = reduced_max_value;
-        }
-    }
-
-    // Global synchronization
-    grid.sync();
-
-    if (blockIdx.x == 0) {
-        T final_max_value = -__FLT_MAX__;
-        size_t final_max_idx = ~size_t(0);
         for (size_t i = tid; i < gridDim.x; i += blockDim.x) {
-            final_sum += output[i];
-            if (out_val[i] > final_max_value || (out_val[i] == final_max_value && i < final_max_idx)) {
-                local_max_value = out_val[i];
-                local_max_idx = i;
+            T v = inter_val[i];
+            size_t orig_idx = inter_idx[i];
+            if (v > final_val || (v == final_val && orig_idx < final_idx)) {
+                final_val = v;
+                final_idx = orig_idx;
             }
         }
-        warp_argmax_reduce(reduced_max_value, reduced_max_idx, final_max_value, final_max_idx, warp_size);
 
-        if (tid % wrap_size == 0) {
-            // coop_sem should be larger than wrap_size * sizeof(T)
-            coop_smem[tid / wrap_size] = reduced_max_value;
-            coop_sidx[tid / warp_size] = reduced_max_idx;
-        }
+        // Reuse shared memory for the final reduction
+        // Need a syncthreads first since smem was used in phase 1
+        __syncthreads();
 
-        block.sync();
-        // __syncthreads();
+        T result_val;
+        size_t result_idx;
+        block_argmax_reduce(result_val, result_idx, final_val, final_idx, warp_size, sval, sidx);
 
-        if (tid < wrap_size) {
-            bool tid_of_valid_smem_value = tid < (blockDim.x + warp_size - 1) / warp_size;
-            T block_max_value = tid_of_valid_smem_value ? coop_smem[tid] : T(-__FLT_MAX__);
-            size_t block_max_idx = tid_of_valid_smem_value ? coop_sidx[tid] : ~size_t(0);
-            warp_argmax_reduce(reduced_max_value, reduced_max_idx, final_max_value, final_max_idx, warp_size);
-            if (tid == 0) {
-                out_val[0] = reduced_max_value;
-                out_idx[0] = reduced_max_idx;
-            }
+        if (tid == 0) {
+            *out_idx = result_idx;
+            *out_val = result_val;
         }
     }
 }
-#endif
+
+// ── typed single-block launcher ─────────────────────────────────────────────
+template <typename T>
+void launch_argmax_single(size_t *out_idx, T *out_val, const T *vals,
+                          size_t numel, unsigned int block_size,
+                          unsigned int warp_size) {
+    size_t smem_size = (block_size + warp_size - 1) / warp_size * (sizeof(T) + sizeof(size_t));
+    argmax_single_block<<<1, block_size, smem_size>>>(out_idx, out_val, vals, numel, warp_size);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// ── persistent intermediate buffer for multi-block path ─────────────────────
+// Bounded in size (grid_size entries, typically < 200), reused across calls.
+// The atomicInc(counter, gridDim.x - 1) in the kernel wraps the counter back
+// to 0 after all blocks complete, so it self-resets between invocations.
+// We only need cudaMemset once at allocation time.
+struct InnerBuffer {
+    std::byte *buf = nullptr;
+    size_t capacity = 0; // max grid_size this buffer can handle
+
+    // Layout: [size_t inter_idx[cap]] [float inter_val[cap]] [uint counter]
+    // sizeof(float) >= sizeof(__half), sizeof(__nv_bfloat16)
+    // float is the largest size supported.
+    static size_t bytes_for(size_t cap) {
+        return cap * sizeof(size_t) + cap * sizeof(float) + sizeof(unsigned int);
+    }
+
+    void ensure(size_t grid_size) {
+        if (grid_size <= capacity) {
+            return;
+        }
+        if (buf) {
+            cudaFree(buf);
+            buf = nullptr;
+        }
+        capacity = grid_size * 2; // 2× headroom
+        CUDA_CHECK(cudaMalloc(&buf, bytes_for(capacity)));
+        // Zero the counter (and everything else for good measure)
+        CUDA_CHECK(cudaMemset(buf, 0, bytes_for(capacity)));
+    }
+
+    template <typename T>
+    void get_ptrs(size_t grid_size, size_t *&idx, T *&val, unsigned int *&counter) {
+        idx = reinterpret_cast<size_t *>(buf);
+        val = reinterpret_cast<T *>(buf + capacity * sizeof(size_t));
+        counter = reinterpret_cast<unsigned int *>(
+            buf + capacity * sizeof(size_t) + capacity * sizeof(float));
+    }
+};
+
+static InnerBuffer &get_inner_buffer() {
+    static auto *b = new InnerBuffer(); // intentionally leaked — bounded, reusable
+    return *b;
+}
+
+// ── typed multi-block launcher (single-pass, last-block reduction) ──────────
+template <typename T>
+void launch_argmax_multiblock(size_t *out_idx, T *out_val, const T *vals,
+                              size_t numel, dim3 grid, dim3 block,
+                              unsigned int warp_size) {
+    auto &ibuf = get_inner_buffer();
+    ibuf.ensure(grid.x);
+
+    size_t *inter_idx;
+    T *inter_val;
+    unsigned int *block_counter;
+    ibuf.get_ptrs<T>(grid.x, inter_idx, inter_val, block_counter);
+
+    unsigned int num_warps = (block.x + warp_size - 1) / warp_size;
+    size_t smem_size = num_warps * (sizeof(T) + sizeof(size_t)) + sizeof(bool);
+
+    argmax_lastblock<<<grid, block, smem_size>>>(out_idx, out_val, vals, numel,
+                                                 inter_idx, inter_val,
+                                                 block_counter, warp_size);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace
 
 namespace llaisys::ops::cuda {
 void argmax(std::byte *max_id, std::byte *max_val, const std::byte *vals,
             llaisysDataType_t dtype, size_t numel) {
-    // Query warp size from device
-    int device = 0;
-    CUDA_CHECK(cudaGetDevice(&device));
-    cudaDeviceProp props{};
-    CUDA_CHECK(cudaGetDeviceProperties(&props, device));
-    unsigned int warp_size = static_cast<unsigned int>(props.warpSize);
+    auto &dev = utils::cuda::get_device_info();
+    dev.refresh();
+    unsigned int warp_size = dev.warp_size;
+    unsigned int max_block = dev.max_block;
 
-    // Choose block/grid dimensions dynamically
-    int block_size = 256;
-    int grid_size = static_cast<int>((numel + block_size - 1) / block_size);
-
-    // Cap grid to ~4 waves of work per SM instead of arbitrary 1024
-    int max_active_blocks = props.multiProcessorCount * 4;
-    if (grid_size > max_active_blocks) {
-        grid_size = max_active_blocks;
-    }
-
-#if defined(CUDA_VERSION) && (CUDA_VERSION >= 900)
-    {
-        dim3 grid(grid_size);
-        dim3 block(block_size);
-
-        int grid_size_v9 = 0;
-        int block_size = block_size;
-        size_t smem_size = (block.x + wrap_size - 1) / wrap_size * (dsize(dtype) + sizeof(size_t));
+    // ── Single-block path for small inputs ──────────────────────────────────
+    // Each thread handles numel/block_size elements. With 1024 threads, up to
+    // ~64K elements means ~64 iterations per thread — a good sweet spot before
+    // multi-SM parallelism becomes worthwhile.
+    constexpr size_t SINGLE_BLOCK_THRESHOLD = 1 << 16; // 64K elements
+    if (numel <= SINGLE_BLOCK_THRESHOLD) {
+        unsigned int block_size;
+        if (numel <= max_block) {
+            block_size = ((static_cast<unsigned int>(numel) + warp_size - 1) / warp_size) * warp_size;
+            if (block_size > max_block) {
+                block_size = max_block;
+            }
+        } else {
+            block_size = max_block;
+        }
 
         switch (dtype) {
         case LLAISYS_DTYPE_F32:
-            CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&grid_size_v9, launch_argmax_cooperatively<float>, block_size, smem_size));
-            break;
+            return launch_argmax_single(reinterpret_cast<size_t *>(max_id),
+                                        reinterpret_cast<float *>(max_val),
+                                        reinterpret_cast<const float *>(vals),
+                                        numel, block_size, warp_size);
         case LLAISYS_DTYPE_F16:
-            CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&grid_size_v9, launch_argmax_cooperatively<__half>, block_size, smem_size));
-            break;
+            return launch_argmax_single(reinterpret_cast<size_t *>(max_id),
+                                        reinterpret_cast<__half *>(max_val),
+                                        reinterpret_cast<const __half *>(vals),
+                                        numel, block_size, warp_size);
         case LLAISYS_DTYPE_BF16:
-            CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&grid_size_v9, launch_argmax_cooperatively<__nv_bfloat16>, block_size, smem_size));
-            break;
+            return launch_argmax_single(reinterpret_cast<size_t *>(max_id),
+                                        reinterpret_cast<__nv_bfloat16 *>(max_val),
+                                        reinterpret_cast<const __nv_bfloat16 *>(vals),
+                                        numel, block_size, warp_size);
         default:
             throw std::runtime_error("argmax_cuda: unsupported dtype");
         }
-
-        grid_size_v9 *= props.multiProcessorCount;
-        grid_size_v9 = min(grid_size_v9, static_cast<int>((n + block_size - 1) / block_size));
-        grid_size_v9 = max(grid_size_v9, 1);
-
-        int can_launch = 0;
-        CUDA_CHECK(cudaDeviceGetAttribute(&can_launch, cudaDevAttrCooperativeLaunch, 0));
-
-        if (can_launch) {
-            size_t *d_out_idx;
-            T *d_out_val;
-            CUDA_CHECK(cudaMalloc(&d_out_idx, grid_size_v9 * sizeof(size_t)));
-            CUDA_CHECK(cudaMalloc(&d_out_val, grid_size_v9 * sizeof(T)));
-
-            void *kernelArgs[] = {&d_out_idx, &d_out_val, &vals, &numel, &wrap_size};
-
-            switch (dtype) {
-            case LLAISYS_DTYPE_F32:
-                CUDA_CHECK(cudaLaunchCooperativeKernel((void *)launch_argmax_cooperatively<float>, grid_size_v9, block, kernelArgs, smem_size, 0));
-                break;
-            case LLAISYS_DTYPE_F16:
-                CUDA_CHECK(cudaLaunchCooperativeKernel((void *)launch_argmax_cooperatively<__half>, grid_size_v9, block, kernelArgs, smem_size, 0));
-                break;
-            case LLAISYS_DTYPE_BF16:
-                CUDA_CHECK(cudaLaunchCooperativeKernel((void *)launch_argmax_cooperatively<__nv_bfloat16>, grid_size_v9, block, kernelArgs, smem_size, 0));
-                break;
-            default:
-                throw std::runtime_error("argmax_cuda: unsupported dtype");
-            }
-
-            CUDA_CHECK(cudaMemcpy(max_id, d_out_idx, sizeof(size_t), cudaMemcpyDeviceToHost));
-            CUDA_CHECK(cudaMemcpy(max_val, d_out_val, utils::dsize(T), cudaMemcpyDeviceToHost));
-
-            CUDA_FREE(d_out_idx)
-            CUDA_FREE(d_out_val)
-        } else {
-            std::cerr << "CUDA device does not support cooperative launch, fall back to shuffle" << '\n';
-            // don't exit, fall back to shuffle.
-        }
     }
-}
-#endif
 
-{
+    // ── Multi-block single-pass path for large inputs ───────────────────────
+    // Single kernel launch.  Last block does the final reduction via
+    // __threadfence() + atomicInc.  Intermediate buffer allocated with
+    // cudaMallocAsync (pool-backed, near-zero latency).
+    int block_size = 1024;
+    int grid_size = static_cast<int>((numel + block_size - 1) / block_size);
+
+    // Cap grid to ~2 waves per SM — fewer blocks means less intermediate
+    // data and a cheaper final reduction in the last block
+    int max_active_blocks = dev.sm_count * 2;
+    if (grid_size > max_active_blocks) {
+        grid_size = max_active_blocks;
+    }
+    if (grid_size < 1) {
+        grid_size = 1;
+    }
+
     dim3 grid(grid_size);
     dim3 block(block_size);
 
     switch (dtype) {
     case LLAISYS_DTYPE_F32:
-        return launch_argmax_shuffle(reinterpret_cast<size_t *>(max_id),
-                                     reinterpret_cast<float *>(max_val),
-                                     reinterpret_cast<const float *>(vals),
-                                     numel, grid, block, warp_size);
+        return launch_argmax_multiblock(reinterpret_cast<size_t *>(max_id),
+                                        reinterpret_cast<float *>(max_val),
+                                        reinterpret_cast<const float *>(vals),
+                                        numel, grid, block, warp_size);
     case LLAISYS_DTYPE_F16:
-        return launch_argmax_shuffle(reinterpret_cast<size_t *>(max_id),
-                                     reinterpret_cast<__half *>(max_val),
-                                     reinterpret_cast<const __half *>(vals),
-                                     numel, grid, block, warp_size);
+        return launch_argmax_multiblock(reinterpret_cast<size_t *>(max_id),
+                                        reinterpret_cast<__half *>(max_val),
+                                        reinterpret_cast<const __half *>(vals),
+                                        numel, grid, block, warp_size);
     case LLAISYS_DTYPE_BF16:
-        return launch_argmax_shuffle(reinterpret_cast<size_t *>(max_id),
-                                     reinterpret_cast<__nv_bfloat16 *>(max_val),
-                                     reinterpret_cast<const __nv_bfloat16 *>(vals),
-                                     numel, grid, block, warp_size);
+        return launch_argmax_multiblock(reinterpret_cast<size_t *>(max_id),
+                                        reinterpret_cast<__nv_bfloat16 *>(max_val),
+                                        reinterpret_cast<const __nv_bfloat16 *>(vals),
+                                        numel, grid, block, warp_size);
     default:
         throw std::runtime_error("argmax_cuda: unsupported dtype");
     }
-}
 }
 } // namespace llaisys::ops::cuda
