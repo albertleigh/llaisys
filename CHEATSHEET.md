@@ -3,8 +3,6 @@
 - xmake f -m debug    
 - xmake project -k compile_commands
 
-or 
-- xmake p -k compdb
 
 ## Install Intel oneAPI MKL
 https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html

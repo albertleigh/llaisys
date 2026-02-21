@@ -20,6 +20,7 @@ option_end()
 if has_config("nv-gpu") then
     add_defines("ENABLE_NVIDIA_API")
     includes("xmake/nvidia.lua")
+    includes("xmake/test_cuda.lua")
 end
 
 target("llaisys-utils")
@@ -205,8 +206,6 @@ target("llaisys")
     end
 
     if is_mode("debug") then
-        set_symbols("debug")
-        set_optimize("none")
         add_defines("DEBUG")
         -- CUDA line info for debug profiling
         if has_config("nv-gpu") then
@@ -223,11 +222,7 @@ target("llaisys")
     after_install(function (target)
         -- copy shared library to python package
         print("Copying llaisys to python/llaisys/libllaisys/ ..")
-        if is_plat("windows") then
-            os.cp("bin/*.dll", "python/llaisys/libllaisys/")
-        end
-        if is_plat("linux") then
-            os.cp("lib/*.so", "python/llaisys/libllaisys/")
-        end
+        local targetfile = target:targetfile()
+        os.cp(targetfile, "python/llaisys/libllaisys/")
     end)
 target_end()

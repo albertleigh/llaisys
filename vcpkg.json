@@ -7,14 +7,25 @@
   "license": "MIT",
   "dependencies": [
     {
+      "name": "gtest",
+      "version>=": "1.15.2"
+    },
+    {
       "name": "openblas",
       "version>=": "0.3.29",
-      "features": ["threads"],
+      "features": [
+        "threads"
+      ],
       "platform": "!uwp"
     }
   ],
-  "builtin-baseline": "2024.11.16",
-  "overrides": []
+  "builtin-baseline": "66c0373dc7fca549e5803087b9487edfe3aca0a1",
+  "overrides": [
+    {
+      "name": "gtest",
+      "version": "1.15.2"
+    }
+  ]
 }
 
 

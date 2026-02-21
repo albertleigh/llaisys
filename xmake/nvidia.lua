@@ -19,9 +19,12 @@ target("llaisys-device-nvidia")
 
     add_files("../src/device/nvidia/*.cu")
 
-    -- Debug-friendly flags for CUDA
+    -- CUDA debug: -G enables device-code breakpoints in cuda-gdb/nsight.
+    -- -G is a superset of -lineinfo so we don't add both.
+    -- Kernels must use cudaOccupancyMaxPotentialBlockSize to handle the
+    -- increased register pressure from -G.
     if is_mode("debug") then
-        add_cuflags("-G", "-lineinfo", "-g", {force = true})
+        add_cuflags("-G", "-g", {force = true})
         add_cxflags("-g")
     end
 
@@ -47,9 +50,12 @@ target("llaisys-ops-cuda")
     add_files("../src/cuda_utils/*.cu")
     add_files("../src/ops/*/cuda/*.cu")
 
-    -- Debug-friendly flags for CUDA
+    -- CUDA debug: -G enables device-code breakpoints in cuda-gdb/nsight.
+    -- -G is a superset of -lineinfo so we don't add both.
+    -- Kernels must use cudaOccupancyMaxPotentialBlockSize to handle the
+    -- increased register pressure from -G.
     if is_mode("debug") then
-        add_cuflags("-G", "-lineinfo", "-g", {force = true})
+        add_cuflags("-G", "-g", {force = true})
         add_cxflags("-g")
     end
 
