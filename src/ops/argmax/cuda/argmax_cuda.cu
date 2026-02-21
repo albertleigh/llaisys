@@ -179,8 +179,21 @@ __global__ void argmax_lastblock(size_t *out_idx, T *out_val,
 // ── typed single-block launcher ─────────────────────────────────────────────
 template <typename T>
 void launch_argmax_single(size_t *out_idx, T *out_val, const T *vals,
-                          size_t numel, unsigned int block_size,
-                          unsigned int warp_size) {
+                          size_t numel, unsigned int warp_size) {
+    // Query the runtime for the max block size this kernel can actually launch
+    int min_grid_size, max_block_size;
+    CUDA_CHECK(cudaOccupancyMaxPotentialBlockSize(
+        &min_grid_size, &max_block_size, argmax_single_block<T>, 0, 0));
+    // (void)min_grid_size;
+
+    unsigned int block_size = static_cast<unsigned int>(max_block_size);
+    // For small inputs, round up to warp boundary
+    if (numel < block_size) {
+        block_size = ((static_cast<unsigned int>(numel) + warp_size - 1) / warp_size) * warp_size;
+        if (block_size > static_cast<unsigned int>(max_block_size))
+            block_size = static_cast<unsigned int>(max_block_size);
+    }
+
     size_t smem_size = (block_size + warp_size - 1) / warp_size * (sizeof(T) + sizeof(size_t));
     argmax_single_block<<<1, block_size, smem_size>>>(out_idx, out_val, vals, numel, warp_size);
     CUDA_CHECK(cudaGetLastError());
@@ -233,20 +246,42 @@ static InnerBuffer &get_inner_buffer() {
 // ── typed multi-block launcher (single-pass, last-block reduction) ──────────
 template <typename T>
 void launch_argmax_multiblock(size_t *out_idx, T *out_val, const T *vals,
-                              size_t numel, dim3 grid, dim3 block,
-                              unsigned int warp_size) {
+                              size_t numel, unsigned int warp_size,
+                              int sm_count) {
+    // Query the runtime for the max block size this kernel can actually launch.
+    // This accounts for register pressure after device linking (-rdc=true),
+    // which can inflate register counts beyond what ptxas reports at compile
+    // time.  Avoids "too many resources requested for launch" errors.
+    int min_grid_size, max_block_size;
+    CUDA_CHECK(cudaOccupancyMaxPotentialBlockSize(
+        &min_grid_size, &max_block_size, argmax_lastblock<T>, 0, 0));
+    (void)min_grid_size;
+
+    int block_size = max_block_size;
+    int grid_size = static_cast<int>((numel + block_size - 1) / block_size);
+
+    // Cap grid to ~2 waves per SM — fewer blocks means less intermediate
+    // data and a cheaper final reduction in the last block
+    int max_active_blocks = sm_count * 2;
+    if (grid_size > max_active_blocks) {
+        grid_size = max_active_blocks;
+    }
+    if (grid_size < 1) {
+        grid_size = 1;
+    }
+
     auto &ibuf = get_inner_buffer();
-    ibuf.ensure(grid.x);
+    ibuf.ensure(grid_size);
 
     size_t *inter_idx;
     T *inter_val;
     unsigned int *block_counter;
-    ibuf.get_ptrs<T>(grid.x, inter_idx, inter_val, block_counter);
+    ibuf.get_ptrs<T>(grid_size, inter_idx, inter_val, block_counter);
 
-    unsigned int num_warps = (block.x + warp_size - 1) / warp_size;
+    unsigned int num_warps = (block_size + warp_size - 1) / warp_size;
     size_t smem_size = num_warps * (sizeof(T) + sizeof(size_t)) + sizeof(bool);
 
-    argmax_lastblock<<<grid, block, smem_size>>>(out_idx, out_val, vals, numel,
+    argmax_lastblock<<<grid_size, block_size, smem_size>>>(out_idx, out_val, vals, numel,
                                                  inter_idx, inter_val,
                                                  block_counter, warp_size);
     CUDA_CHECK(cudaGetLastError());
@@ -260,7 +295,6 @@ void argmax(std::byte *max_id, std::byte *max_val, const std::byte *vals,
     auto &dev = utils::cuda::get_device_info();
     dev.refresh();
     unsigned int warp_size = dev.warp_size;
-    unsigned int max_block = dev.max_block;
 
     // ── Single-block path for small inputs ──────────────────────────────────
     // Each thread handles numel/block_size elements. With 1024 threads, up to
@@ -268,73 +302,47 @@ void argmax(std::byte *max_id, std::byte *max_val, const std::byte *vals,
     // multi-SM parallelism becomes worthwhile.
     constexpr size_t SINGLE_BLOCK_THRESHOLD = 1 << 16; // 64K elements
     if (numel <= SINGLE_BLOCK_THRESHOLD) {
-        unsigned int block_size;
-        if (numel <= max_block) {
-            block_size = ((static_cast<unsigned int>(numel) + warp_size - 1) / warp_size) * warp_size;
-            if (block_size > max_block) {
-                block_size = max_block;
-            }
-        } else {
-            block_size = max_block;
-        }
-
         switch (dtype) {
         case LLAISYS_DTYPE_F32:
             return launch_argmax_single(reinterpret_cast<size_t *>(max_id),
                                         reinterpret_cast<float *>(max_val),
                                         reinterpret_cast<const float *>(vals),
-                                        numel, block_size, warp_size);
+                                        numel, warp_size);
         case LLAISYS_DTYPE_F16:
             return launch_argmax_single(reinterpret_cast<size_t *>(max_id),
                                         reinterpret_cast<__half *>(max_val),
                                         reinterpret_cast<const __half *>(vals),
-                                        numel, block_size, warp_size);
+                                        numel, warp_size);
         case LLAISYS_DTYPE_BF16:
             return launch_argmax_single(reinterpret_cast<size_t *>(max_id),
                                         reinterpret_cast<__nv_bfloat16 *>(max_val),
                                         reinterpret_cast<const __nv_bfloat16 *>(vals),
-                                        numel, block_size, warp_size);
+                                        numel, warp_size);
         default:
             throw std::runtime_error("argmax_cuda: unsupported dtype");
         }
     }
 
     // ── Multi-block single-pass path for large inputs ───────────────────────
-    // Single kernel launch.  Last block does the final reduction via
-    // __threadfence() + atomicInc.  Intermediate buffer allocated with
-    // cudaMallocAsync (pool-backed, near-zero latency).
-    int block_size = 1024;
-    int grid_size = static_cast<int>((numel + block_size - 1) / block_size);
-
-    // Cap grid to ~2 waves per SM — fewer blocks means less intermediate
-    // data and a cheaper final reduction in the last block
-    int max_active_blocks = dev.sm_count * 2;
-    if (grid_size > max_active_blocks) {
-        grid_size = max_active_blocks;
-    }
-    if (grid_size < 1) {
-        grid_size = 1;
-    }
-
-    dim3 grid(grid_size);
-    dim3 block(block_size);
-
+    // Block size is determined by cudaOccupancyMaxPotentialBlockSize so that
+    // the launch respects actual register limits (which can increase beyond
+    // compile-time ptxas estimates after device linking with -rdc=true).
     switch (dtype) {
     case LLAISYS_DTYPE_F32:
         return launch_argmax_multiblock(reinterpret_cast<size_t *>(max_id),
                                         reinterpret_cast<float *>(max_val),
                                         reinterpret_cast<const float *>(vals),
-                                        numel, grid, block, warp_size);
+                                        numel, warp_size, dev.sm_count);
     case LLAISYS_DTYPE_F16:
         return launch_argmax_multiblock(reinterpret_cast<size_t *>(max_id),
                                         reinterpret_cast<__half *>(max_val),
                                         reinterpret_cast<const __half *>(vals),
-                                        numel, grid, block, warp_size);
+                                        numel, warp_size, dev.sm_count);
     case LLAISYS_DTYPE_BF16:
         return launch_argmax_multiblock(reinterpret_cast<size_t *>(max_id),
                                         reinterpret_cast<__nv_bfloat16 *>(max_val),
                                         reinterpret_cast<const __nv_bfloat16 *>(vals),
-                                        numel, grid, block, warp_size);
+                                        numel, warp_size, dev.sm_count);
     default:
         throw std::runtime_error("argmax_cuda: unsupported dtype");
     }

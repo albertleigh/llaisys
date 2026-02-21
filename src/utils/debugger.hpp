@@ -1,7 +1,7 @@
 //
 // Created by ali on 2/8/26.
 //
-
+#pragma once
 #include <fstream>
 #include <string>
 
@@ -11,16 +11,15 @@
 #include <unistd.h>
 #endif
 
-#pragma once
 namespace llaisys::debugger {
 
 #ifdef _WIN32
 // Windows implementation
-bool isDebuggerAttached() {
+inline bool isDebuggerAttached() {
     return IsDebuggerPresent() != 0;
 }
 
-void waitForDebugger() {
+inline void waitForDebugger() {
     char *wait_debug = nullptr;
     size_t len = 0;
     _dupenv_s(&wait_debug, &len, "LLAISYS_WAIT_DEBUGGER");
@@ -40,7 +39,7 @@ void waitForDebugger() {
 
 #else
 // Linux/Unix implementation
-bool isDebuggerAttached() {
+inline bool isDebuggerAttached() {
     std::ifstream statusFile("/proc/self/status");
     std::string line;
     while (std::getline(statusFile, line)) {
@@ -56,7 +55,7 @@ bool isDebuggerAttached() {
     return false;
 }
 
-void waitForDebugger() {
+inline void waitForDebugger() {
     const char *wait_debug = std::getenv("LLAISYS_WAIT_DEBUGGER");
     if (wait_debug && std::string(wait_debug) == "1") {
         std::printf("PID %d waiting for debugger to attach...\n", getpid());
