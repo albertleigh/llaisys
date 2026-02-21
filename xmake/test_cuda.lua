@@ -58,6 +58,7 @@ target("test-cuda")
 
     -- CUDA runtime
     add_links("cudart")
+    add_links("cublas")
 
     on_install(function (target) end)
 target_end()
