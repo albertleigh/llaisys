@@ -216,7 +216,9 @@ target("llaisys")
     -- CUDA runtime linking
     if has_config("nv-gpu") then
         add_links("cudart")
-        add_links("cublas")
+        -- Force NEEDED entry for cublas/cublasLt: symbols are called from static
+        -- .cu objects so --as-needed (the default) would drop the dependency.
+        add_shflags("-Wl,--no-as-needed", "-lcublas", "-lcublasLt", "-Wl,--as-needed", {force = true})
     end
     
     after_install(function (target)
