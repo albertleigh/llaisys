@@ -65,3 +65,4 @@ python test/ops/add.py --device nvidia --profile
 
 python test/test_infer.py --model [dir_path/to/model] --test --device nvidia
 python test/test_infer.py --device cpu --model ./models/DeepSeek-R1-Distill-Qwen-1.5B
+python test/test_infer.py --device nvidia --model ./models/DeepSeek-R1-Distill-Qwen-1.5B

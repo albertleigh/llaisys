@@ -272,7 +272,7 @@ tensor_t Tensor::contiguous() const {
         return std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset));
     }
 
-    ASSERT(this->deviceType() == LLAISYS_DEVICE_CPU, "Only CPU tensor can be contiguous");
+    ASSERT(this->deviceType() == LLAISYS_DEVICE_CPU, "Only CPU tensor can be incontiguous");
     auto result = Tensor::create(this->shape(), this->dtype(), this->deviceType(), this->deviceId());
     ops::rearrange(result, std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset)));
     return result;
@@ -286,8 +286,45 @@ tensor_t Tensor::reshape(const std::vector<size_t> &shape) const {
 }
 
 tensor_t Tensor::to(llaisysDeviceType_t device_type, int device) const {
-    TO_BE_IMPLEMENTED();
-    return std::shared_ptr<Tensor>(new Tensor(_meta, _storage));
+    if (device < 0) {
+        device = this->deviceId();
+    }
+
+    // Already on target device
+    if (this->deviceType() == device_type && this->deviceId() == device) {
+        return std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset));
+    }
+
+    // Ensure contiguous layout before cross-device copy
+    auto src = this->isContiguous()
+        ? std::shared_ptr<Tensor>(new Tensor(_meta, _storage, _offset))
+        : this->contiguous();
+
+    auto dst = Tensor::create(src->shape(), src->dtype(), device_type, device);
+    size_t nbytes = src->numel() * src->elementSize();
+
+    llaisysDeviceType_t src_device = src->deviceType();
+
+    if (src_device == LLAISYS_DEVICE_CPU && device_type == LLAISYS_DEVICE_CPU) {
+        std::memcpy(dst->data(), src->data(), nbytes);
+    } else if (src_device == LLAISYS_DEVICE_CPU) {
+        // H2D
+        core::context().setDevice(device_type, device);
+        core::context().runtime().api()->memcpy_sync(
+            dst->data(), src->data(), nbytes, LLAISYS_MEMCPY_H2D);
+    } else if (device_type == LLAISYS_DEVICE_CPU) {
+        // D2H
+        core::context().setDevice(src_device, src->deviceId());
+        core::context().runtime().api()->memcpy_sync(
+            dst->data(), src->data(), nbytes, LLAISYS_MEMCPY_D2H);
+    } else {
+        // D2D
+        core::context().setDevice(src_device, src->deviceId());
+        core::context().runtime().api()->memcpy_sync(
+            dst->data(), src->data(), nbytes, LLAISYS_MEMCPY_D2D);
+    }
+
+    return dst;
 }
 
 } // namespace llaisys

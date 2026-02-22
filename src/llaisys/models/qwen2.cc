@@ -145,14 +145,15 @@ int64_t llaisysQwen2ModelInfer(LlaisysQwen2Model *model, int64_t *token_ids, siz
     // --- 1. Prepare Inputs ---
     std::vector<int64_t> seq_shape = {static_cast<int64_t>(ntoken)};
 
-    tensor_t input = create_tensor(seq_shape, LLAISYS_DTYPE_I64, LLAISYS_DEVICE_CPU);
-    std::memcpy(input->data(), token_ids, ntoken * sizeof(int64_t));
+    tensor_t input = create_tensor(seq_shape, LLAISYS_DTYPE_I64, model->device_type);
+    input->load(token_ids);
 
-    tensor_t pos_ids = create_tensor(seq_shape, ::LLAISYS_DTYPE_I64, LLAISYS_DEVICE_CPU);
-    int64_t *pos_ptr = reinterpret_cast<int64_t *>(pos_ids->data());
+    std::vector<int64_t> pos_data(ntoken);
     for (size_t i = 0; i < ntoken; ++i) {
-        pos_ptr[i] = static_cast<int64_t>(model->pos + i);
+        pos_data[i] = static_cast<int64_t>(model->pos + i);
     }
+    tensor_t pos_ids = create_tensor(seq_shape, ::LLAISYS_DTYPE_I64, model->device_type);
+    pos_ids->load(pos_data.data());
 
     // --- 2. Embedding ---
     tensor_t hidden_states = create_tensor(
@@ -160,13 +161,6 @@ int64_t llaisysQwen2ModelInfer(LlaisysQwen2Model *model, int64_t *token_ids, siz
         static_cast<llaisysDataType_t>(model->meta.dtype),
         model->device_type);
     ops::embedding(hidden_states, input, model->t(model->weights.in_embed));
-
-    // printf("[DEBUG] After Embedding [0:5] = ");
-    // const float* emb_data = reinterpret_cast<const float*>(hidden_states->data());
-    // for (int i = 0; i < std::min(5, (int)model->meta.hs); i++) {
-    //     printf("%.4f ", emb_data[i]);
-    // }
-    // printf("\n");
 
     // --- 3. Layers ---
     for (size_t i = 0; i < model->meta.nlayer; ++i) {
@@ -208,8 +202,16 @@ int64_t llaisysQwen2ModelInfer(LlaisysQwen2Model *model, int64_t *token_ids, siz
                 if (cache_idx >= model->meta.maxseq) {
                     break;
                 }
-                std::memcpy(dst_k_base + cache_idx * row_size_bytes, src_k_base + t * row_size_bytes, row_size_bytes);
-                std::memcpy(dst_v_base + cache_idx * row_size_bytes, src_v_base + t * row_size_bytes, row_size_bytes);
+                if (model->device_type == LLAISYS_DEVICE_CPU) {
+                    std::memcpy(dst_k_base + cache_idx * row_size_bytes, src_k_base + t * row_size_bytes, row_size_bytes);
+                    std::memcpy(dst_v_base + cache_idx * row_size_bytes, src_v_base + t * row_size_bytes, row_size_bytes);
+                } else {
+                    core::context().setDevice(model->device_type, 0);
+                    core::context().runtime().api()->memcpy_sync(
+                        dst_k_base + cache_idx * row_size_bytes, src_k_base + t * row_size_bytes, row_size_bytes, LLAISYS_MEMCPY_D2D);
+                    core::context().runtime().api()->memcpy_sync(
+                        dst_v_base + cache_idx * row_size_bytes, src_v_base + t * row_size_bytes, row_size_bytes, LLAISYS_MEMCPY_D2D);
+                }
             }
         }
 
@@ -278,7 +280,13 @@ int64_t llaisysQwen2ModelInfer(LlaisysQwen2Model *model, int64_t *token_ids, siz
     size_t d_bytes = model->meta.hs * final_norm_out->elementSize();
     uint8_t *dst_ptr = reinterpret_cast<uint8_t *>(last_token_emb->data());
     const uint8_t *src_ptr = reinterpret_cast<const uint8_t *>(final_norm_out->data());
-    std::memcpy(dst_ptr, src_ptr + (ntoken - 1) * d_bytes, d_bytes);
+    if (model->device_type == LLAISYS_DEVICE_CPU) {
+        std::memcpy(dst_ptr, src_ptr + (ntoken - 1) * d_bytes, d_bytes);
+    } else {
+        core::context().setDevice(model->device_type, 0);
+        core::context().runtime().api()->memcpy_sync(
+            dst_ptr, src_ptr + (ntoken - 1) * d_bytes, d_bytes, LLAISYS_MEMCPY_D2D);
+    }
 
     tensor_t logits = create_tensor({1, static_cast<int64_t>(model->meta.voc)}, hidden_states->dtype(), model->device_type);
     ops::linear(logits, last_token_emb, model->t(model->weights.out_embed), nullptr);
@@ -288,7 +296,14 @@ int64_t llaisysQwen2ModelInfer(LlaisysQwen2Model *model, int64_t *token_ids, siz
 
     ops::argmax(max_idx, max_val, logits);
 
-    int64_t next_token = *reinterpret_cast<int64_t *>(max_idx->data());
+    int64_t next_token;
+    if (model->device_type == LLAISYS_DEVICE_CPU) {
+        next_token = *reinterpret_cast<int64_t *>(max_idx->data());
+    } else {
+        core::context().setDevice(model->device_type, 0);
+        core::context().runtime().api()->memcpy_sync(
+            &next_token, max_idx->data(), sizeof(int64_t), LLAISYS_MEMCPY_D2H);
+    }
 
     // Update global position
     model->pos += ntoken;
