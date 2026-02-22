@@ -26,7 +26,7 @@ __pycache__/
 cache/
 
 # JSON
-*.json
+compile_commands.json
 !vcpkg.json
 
 #GGUF
@@ -92,3 +92,6 @@ desktop.ini
 
 /models
 /vcpkg_installed
+
+# Frontend
+node_modules

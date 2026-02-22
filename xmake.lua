@@ -10,6 +10,15 @@ add_includedirs("include")
 -- CPU --
 includes("xmake/cpu.lua")
 
+-- Portal UI (React + Vite) --
+includes("xmake/portal.lua")
+
+-- Python library (python/) --
+includes("xmake/pylib.lua")
+
+-- Infer service (FastAPI) --
+includes("xmake/infer.lua")
+
 -- NVIDIA --
 option("nv-gpu")
     set_default(false)
