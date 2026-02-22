@@ -3,6 +3,7 @@
 //
 
 #pragma once
+#include "../../../core/llaisys_core.hpp"
 #include "llaisys.h"
 
 #include <cstddef>
@@ -14,5 +15,6 @@ void self_attention(
     float scale, llaisysDataType_t dtype,
     const std::vector<size_t> &q_shap,
     const std::vector<size_t> &k_shap,
-    const std::vector<size_t> &v_shap);
+    const std::vector<size_t> &v_shap,
+    llaisysStream_t stream = core::context().runtime().stream());
 } // namespace llaisys::ops::cuda

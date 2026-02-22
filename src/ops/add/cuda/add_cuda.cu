@@ -11,8 +11,8 @@
 #include <stdexcept>
 #include <type_traits>
 
-#include "../../../utils.hpp"
 #include "../../../cuda_utils/check.cuh"
+#include "../../../utils.hpp"
 
 namespace {
 
@@ -52,26 +52,27 @@ constexpr int BLOCK_SIZE = 256;
 } // namespace
 
 namespace llaisys::ops::cuda {
-void add(std::byte *c, const std::byte *a, const std::byte *b, llaisysDataType_t type, size_t numel) {
+void add(std::byte *c, const std::byte *a, const std::byte *b, llaisysDataType_t type, size_t numel, llaisysStream_t stream) {
     int grid = static_cast<int>((numel + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
 
     switch (type) {
     case LLAISYS_DTYPE_F32:
-        add_kernel<<<grid, BLOCK_SIZE>>>(
+        add_kernel<<<grid, BLOCK_SIZE, 0, s>>>(
             reinterpret_cast<float *>(c),
             reinterpret_cast<const float *>(a),
             reinterpret_cast<const float *>(b),
             numel);
         break;
     case LLAISYS_DTYPE_F16:
-        add_kernel<<<grid, BLOCK_SIZE>>>(
+        add_kernel<<<grid, BLOCK_SIZE, 0, s>>>(
             reinterpret_cast<__half *>(c),
             reinterpret_cast<const __half *>(a),
             reinterpret_cast<const __half *>(b),
             numel);
         break;
     case LLAISYS_DTYPE_BF16:
-        add_kernel<<<grid, BLOCK_SIZE>>>(
+        add_kernel<<<grid, BLOCK_SIZE, 0, s>>>(
             reinterpret_cast<__nv_bfloat16 *>(c),
             reinterpret_cast<const __nv_bfloat16 *>(a),
             reinterpret_cast<const __nv_bfloat16 *>(b),

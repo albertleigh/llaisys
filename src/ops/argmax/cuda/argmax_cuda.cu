@@ -179,7 +179,7 @@ __global__ void argmax_lastblock(size_t *out_idx, T *out_val,
 // ── typed single-block launcher ─────────────────────────────────────────────
 template <typename T>
 void launch_argmax_single(size_t *out_idx, T *out_val, const T *vals,
-                          size_t numel, unsigned int warp_size) {
+                          size_t numel, unsigned int warp_size, cudaStream_t stream) {
     // Query the runtime for the max block size this kernel can actually launch
     int min_grid_size, max_block_size;
     CUDA_CHECK(cudaOccupancyMaxPotentialBlockSize(
@@ -195,7 +195,7 @@ void launch_argmax_single(size_t *out_idx, T *out_val, const T *vals,
     }
 
     size_t smem_size = (block_size + warp_size - 1) / warp_size * (sizeof(T) + sizeof(size_t));
-    argmax_single_block<<<1, block_size, smem_size>>>(out_idx, out_val, vals, numel, warp_size);
+    argmax_single_block<<<1, block_size, smem_size, stream>>>(out_idx, out_val, vals, numel, warp_size);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -247,7 +247,7 @@ static InnerBuffer &get_inner_buffer() {
 template <typename T>
 void launch_argmax_multiblock(size_t *out_idx, T *out_val, const T *vals,
                               size_t numel, unsigned int warp_size,
-                              int sm_count) {
+                              int sm_count, cudaStream_t stream) {
     // Query the runtime for the max block size this kernel can actually launch.
     // This accounts for register pressure after device linking (-rdc=true),
     // which can inflate register counts beyond what ptxas reports at compile
@@ -281,7 +281,7 @@ void launch_argmax_multiblock(size_t *out_idx, T *out_val, const T *vals,
     unsigned int num_warps = (block_size + warp_size - 1) / warp_size;
     size_t smem_size = num_warps * (sizeof(T) + sizeof(size_t)) + sizeof(bool);
 
-    argmax_lastblock<<<grid_size, block_size, smem_size>>>(out_idx, out_val, vals, numel,
+    argmax_lastblock<<<grid_size, block_size, smem_size, stream>>>(out_idx, out_val, vals, numel,
                                                  inter_idx, inter_val,
                                                  block_counter, warp_size);
     CUDA_CHECK(cudaGetLastError());
@@ -291,10 +291,11 @@ void launch_argmax_multiblock(size_t *out_idx, T *out_val, const T *vals,
 
 namespace llaisys::ops::cuda {
 void argmax(std::byte *max_id, std::byte *max_val, const std::byte *vals,
-            llaisysDataType_t dtype, size_t numel) {
+            llaisysDataType_t dtype, size_t numel, llaisysStream_t stream) {
     auto &dev = utils::cuda::get_device_info();
     dev.refresh();
     unsigned int warp_size = dev.warp_size;
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
 
     // ── Single-block path for small inputs ──────────────────────────────────
     // Each thread handles numel/block_size elements. With 1024 threads, up to
@@ -307,17 +308,17 @@ void argmax(std::byte *max_id, std::byte *max_val, const std::byte *vals,
             return launch_argmax_single(reinterpret_cast<size_t *>(max_id),
                                         reinterpret_cast<float *>(max_val),
                                         reinterpret_cast<const float *>(vals),
-                                        numel, warp_size);
+                                        numel, warp_size, s);
         case LLAISYS_DTYPE_F16:
             return launch_argmax_single(reinterpret_cast<size_t *>(max_id),
                                         reinterpret_cast<__half *>(max_val),
                                         reinterpret_cast<const __half *>(vals),
-                                        numel, warp_size);
+                                        numel, warp_size, s);
         case LLAISYS_DTYPE_BF16:
             return launch_argmax_single(reinterpret_cast<size_t *>(max_id),
                                         reinterpret_cast<__nv_bfloat16 *>(max_val),
                                         reinterpret_cast<const __nv_bfloat16 *>(vals),
-                                        numel, warp_size);
+                                        numel, warp_size, s);
         default:
             throw std::runtime_error("argmax_cuda: unsupported dtype");
         }
@@ -332,17 +333,17 @@ void argmax(std::byte *max_id, std::byte *max_val, const std::byte *vals,
         return launch_argmax_multiblock(reinterpret_cast<size_t *>(max_id),
                                         reinterpret_cast<float *>(max_val),
                                         reinterpret_cast<const float *>(vals),
-                                        numel, warp_size, dev.sm_count);
+                                        numel, warp_size, dev.sm_count, s);
     case LLAISYS_DTYPE_F16:
         return launch_argmax_multiblock(reinterpret_cast<size_t *>(max_id),
                                         reinterpret_cast<__half *>(max_val),
                                         reinterpret_cast<const __half *>(vals),
-                                        numel, warp_size, dev.sm_count);
+                                        numel, warp_size, dev.sm_count, s);
     case LLAISYS_DTYPE_BF16:
         return launch_argmax_multiblock(reinterpret_cast<size_t *>(max_id),
                                         reinterpret_cast<__nv_bfloat16 *>(max_val),
                                         reinterpret_cast<const __nv_bfloat16 *>(vals),
-                                        numel, warp_size, dev.sm_count);
+                                        numel, warp_size, dev.sm_count, s);
     default:
         throw std::runtime_error("argmax_cuda: unsupported dtype");
     }

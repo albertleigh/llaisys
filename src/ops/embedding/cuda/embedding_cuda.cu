@@ -37,7 +37,7 @@ __global__ void embedding_kernel(T *out, const int64_t *index, const T *weight,
 // ── typed launcher ──────────────────────────────────────────────────────────
 template <typename T>
 void launch_embedding(T *out, const int64_t *index, const T *weight,
-                      size_t size, size_t embedding_dim) {
+                      size_t size, size_t embedding_dim, cudaStream_t stream) {
     // Use a 2D block: 256 threads along embedding dim, 1 along batch.
     // This maximises coalesced memory access for the copy.
     constexpr unsigned int BLOCK_X = 256;
@@ -47,7 +47,7 @@ void launch_embedding(T *out, const int64_t *index, const T *weight,
     dim3 grid((static_cast<unsigned int>(embedding_dim) + BLOCK_X - 1) / BLOCK_X,
               (static_cast<unsigned int>(size) + BLOCK_Y - 1) / BLOCK_Y);
 
-    embedding_kernel<<<grid, block>>>(out, index, weight, size, embedding_dim);
+    embedding_kernel<<<grid, block, 0, stream>>>(out, index, weight, size, embedding_dim);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -55,23 +55,24 @@ void launch_embedding(T *out, const int64_t *index, const T *weight,
 
 namespace llaisys::ops::cuda {
 void embedding(std::byte *out, const std::byte *index, const std::byte *weight,
-               llaisysDataType_t dtype, size_t size, size_t embedding_dim) {
+               llaisysDataType_t dtype, size_t size, size_t embedding_dim, llaisysStream_t stream) {
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
     switch (dtype) {
     case LLAISYS_DTYPE_F16:
         return launch_embedding(reinterpret_cast<__half *>(out),
                                 reinterpret_cast<const int64_t *>(index),
                                 reinterpret_cast<const __half *>(weight),
-                                size, embedding_dim);
+                                size, embedding_dim, s);
     case LLAISYS_DTYPE_F32:
         return launch_embedding(reinterpret_cast<float *>(out),
                                 reinterpret_cast<const int64_t *>(index),
                                 reinterpret_cast<const float *>(weight),
-                                size, embedding_dim);
+                                size, embedding_dim, s);
     case LLAISYS_DTYPE_BF16:
         return launch_embedding(reinterpret_cast<__nv_bfloat16 *>(out),
                                 reinterpret_cast<const int64_t *>(index),
                                 reinterpret_cast<const __nv_bfloat16 *>(weight),
-                                size, embedding_dim);
+                                size, embedding_dim, s);
     default:
         throw std::runtime_error("embedding_cuda: unsupported dtype");
     }

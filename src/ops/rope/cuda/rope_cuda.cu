@@ -73,7 +73,7 @@ __global__ void rope_kernel(T *out, const T *in, const int64_t *pos_ids,
 
 template <typename T>
 void launch_rope(T *out, const T *in, const int64_t *pos_ids, float theta,
-                 size_t seq_len, size_t num_heads, size_t head_dim) {
+                 size_t seq_len, size_t num_heads, size_t head_dim, cudaStream_t stream) {
     const size_t half_dim = head_dim / 2;
     const size_t total = seq_len * half_dim;
 
@@ -83,7 +83,7 @@ void launch_rope(T *out, const T *in, const int64_t *pos_ids, float theta,
         grid = 65535;
     }
 
-    rope_kernel<<<grid, block>>>(out, in, pos_ids,
+    rope_kernel<<<grid, block, 0, stream>>>(out, in, pos_ids,
                                  theta,
                                  seq_len, num_heads, head_dim, half_dim);
     CUDA_CHECK(cudaGetLastError());
@@ -93,26 +93,27 @@ void launch_rope(T *out, const T *in, const int64_t *pos_ids, float theta,
 
 namespace llaisys::ops::cuda {
 void rope(std::byte *out, const std::byte *in, const std::byte *pos_ids, float theta,
-          llaisysDataType_t dtype, const std::vector<size_t> &dims) {
+          llaisysDataType_t dtype, const std::vector<size_t> &dims, llaisysStream_t stream) {
     const size_t seq_len = dims[0];
     const size_t num_heads = dims[1];
     const size_t head_dim = dims[2];
 
     const auto *pos = reinterpret_cast<const int64_t *>(pos_ids);
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
 
     switch (dtype) {
     case LLAISYS_DTYPE_F32:
         return launch_rope(reinterpret_cast<float *>(out),
                            reinterpret_cast<const float *>(in),
-                           pos, theta, seq_len, num_heads, head_dim);
+                           pos, theta, seq_len, num_heads, head_dim, s);
     case LLAISYS_DTYPE_F16:
         return launch_rope(reinterpret_cast<__half *>(out),
                            reinterpret_cast<const __half *>(in),
-                           pos, theta, seq_len, num_heads, head_dim);
+                           pos, theta, seq_len, num_heads, head_dim, s);
     case LLAISYS_DTYPE_BF16:
         return launch_rope(reinterpret_cast<__nv_bfloat16 *>(out),
                            reinterpret_cast<const __nv_bfloat16 *>(in),
-                           pos, theta, seq_len, num_heads, head_dim);
+                           pos, theta, seq_len, num_heads, head_dim, s);
     default:
         throw std::runtime_error("rope_cuda: unsupported dtype");
     }

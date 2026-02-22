@@ -1,5 +1,8 @@
 #include "op.hpp"
 
+#include "../../core/llaisys_core.hpp"
+#include "../../utils.hpp"
+
 #include "cpu/embedding_cpu.hpp"
 
 #ifdef ENABLE_NVIDIA_API

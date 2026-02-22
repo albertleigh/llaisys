@@ -114,6 +114,10 @@ if __name__ == "__main__":
     del model
     gc.collect()
 
+    # empty the torch cache, otherwise it would impact the llaisys perf while free them.
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     print("\n=== Answer ===\n")
     print("Tokens:")
     print(tokens)

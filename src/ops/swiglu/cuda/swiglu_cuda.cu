@@ -37,12 +37,12 @@ __global__ void swiglu_kernel(T *out, const T *gate, const T *up, size_t numel) 
 }
 
 template <typename T>
-void launch_swiglu(T *out, const T *gate, const T *up, size_t numel) {
+void launch_swiglu(T *out, const T *gate, const T *up, size_t numel, cudaStream_t stream) {
     int block = 256;
     int grid  = static_cast<int>((numel + block - 1) / block);
     if (grid > 65535) grid = 65535;
 
-    swiglu_kernel<<<grid, block>>>(out, gate, up, numel);
+    swiglu_kernel<<<grid, block, 0, stream>>>(out, gate, up, numel);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -50,20 +50,21 @@ void launch_swiglu(T *out, const T *gate, const T *up, size_t numel) {
 
 namespace llaisys::ops::cuda {
 void swiglu(std::byte *out, const std::byte *gate, const std::byte *up,
-            llaisysDataType_t dtype, size_t numel) {
+            llaisysDataType_t dtype, size_t numel, llaisysStream_t stream) {
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
     switch (dtype) {
     case LLAISYS_DTYPE_F32:
         return launch_swiglu(reinterpret_cast<float *>(out),
                              reinterpret_cast<const float *>(gate),
-                             reinterpret_cast<const float *>(up), numel);
+                             reinterpret_cast<const float *>(up), numel, s);
     case LLAISYS_DTYPE_F16:
         return launch_swiglu(reinterpret_cast<__half *>(out),
                              reinterpret_cast<const __half *>(gate),
-                             reinterpret_cast<const __half *>(up), numel);
+                             reinterpret_cast<const __half *>(up), numel, s);
     case LLAISYS_DTYPE_BF16:
         return launch_swiglu(reinterpret_cast<__nv_bfloat16 *>(out),
                              reinterpret_cast<const __nv_bfloat16 *>(gate),
-                             reinterpret_cast<const __nv_bfloat16 *>(up), numel);
+                             reinterpret_cast<const __nv_bfloat16 *>(up), numel, s);
     default:
         throw std::runtime_error("swiglu_cuda: unsupported dtype");
     }

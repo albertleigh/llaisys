@@ -172,13 +172,13 @@ template <typename T>
 void launch_self_attention(T *attn, const T *q, const T *k, const T *v,
                            float scale,
                            size_t seq, size_t nh, size_t d,
-                           size_t sk,  size_t nh_kv, size_t dv) {
+                           size_t sk,  size_t nh_kv, size_t dv, cudaStream_t stream) {
     size_t total = seq * nh;
     int block = 256;
     int grid  = static_cast<int>((total + block - 1) / block);
     if (grid > 65535) grid = 65535;
     size_t n_rep = nh / nh_kv;
-    self_attention_kernel<<<grid, block>>>(
+    self_attention_kernel<<<grid, block, 0, stream>>>(
         attn, q, k, v, scale, seq, nh, d, sk, nh_kv, dv, n_rep);
     CUDA_CHECK(cudaGetLastError());
 }
@@ -203,9 +203,10 @@ void self_attention_cublas(
     T *attn, const T *q, const T *k, const T *v,
     float scale,
     size_t seq, size_t nh, size_t d,
-    size_t sk,  size_t nh_kv, size_t dv) {
+    size_t sk,  size_t nh_kv, size_t dv, cudaStream_t stream) {
 
     auto &ctx   = get_cublas();
+    cublasSetStream(ctx.handle, stream);
     size_t n_rep = nh / nh_kv;
 
     // workspace for scores: (nh, seq, sk) contiguous
@@ -238,7 +239,7 @@ void self_attention_cublas(
         int blk  = 256;
         int grid = static_cast<int>((total_rows + blk - 1) / blk);
         if (grid > 65535) grid = 65535;
-        causal_softmax_kernel<<<grid, blk>>>(scores, seq, sk, total_rows);
+        causal_softmax_kernel<<<grid, blk, 0, stream>>>(scores, seq, sk, total_rows);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -270,7 +271,8 @@ void self_attention(
     float scale, llaisysDataType_t dtype,
     const std::vector<size_t> &q_shap,
     const std::vector<size_t> &k_shap,
-    const std::vector<size_t> &v_shap) {
+    const std::vector<size_t> &v_shap,
+    llaisysStream_t stream) {
 
     const size_t seq   = q_shap[0];
     const size_t nh    = q_shap[1];
@@ -278,6 +280,7 @@ void self_attention(
     const size_t sk    = k_shap[0];
     const size_t nh_kv = k_shap[1];
     const size_t dv    = v_shap[2];
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
 
     // cuBLAS batched GEMM path for larger problems; the overhead of cuBLAS
     // setup is amortised once the matrices are big enough for tensor-cores.
@@ -291,21 +294,21 @@ void self_attention(
                 reinterpret_cast<const __half *>(q),
                 reinterpret_cast<const __half *>(k),
                 reinterpret_cast<const __half *>(v),
-                scale, seq, nh, d, sk, nh_kv, dv);
+                scale, seq, nh, d, sk, nh_kv, dv, s);
         case LLAISYS_DTYPE_F32:
             return self_attention_cublas<float, CUDA_R_32F>(
                 reinterpret_cast<float *>(attn),
                 reinterpret_cast<const float *>(q),
                 reinterpret_cast<const float *>(k),
                 reinterpret_cast<const float *>(v),
-                scale, seq, nh, d, sk, nh_kv, dv);
+                scale, seq, nh, d, sk, nh_kv, dv, s);
         case LLAISYS_DTYPE_BF16:
             return self_attention_cublas<__nv_bfloat16, CUDA_R_16BF>(
                 reinterpret_cast<__nv_bfloat16 *>(attn),
                 reinterpret_cast<const __nv_bfloat16 *>(q),
                 reinterpret_cast<const __nv_bfloat16 *>(k),
                 reinterpret_cast<const __nv_bfloat16 *>(v),
-                scale, seq, nh, d, sk, nh_kv, dv);
+                scale, seq, nh, d, sk, nh_kv, dv, s);
         default:
             throw std::runtime_error("self_attention_cuda: unsupported dtype");
         }
@@ -322,21 +325,21 @@ void self_attention(
             reinterpret_cast<const __half *>(q),
             reinterpret_cast<const __half *>(k),
             reinterpret_cast<const __half *>(v),
-            scale, seq, nh, d, sk, nh_kv, dv);
+            scale, seq, nh, d, sk, nh_kv, dv, s);
     case LLAISYS_DTYPE_F32:
         return launch_self_attention(
             reinterpret_cast<float *>(attn),
             reinterpret_cast<const float *>(q),
             reinterpret_cast<const float *>(k),
             reinterpret_cast<const float *>(v),
-            scale, seq, nh, d, sk, nh_kv, dv);
+            scale, seq, nh, d, sk, nh_kv, dv, s);
     case LLAISYS_DTYPE_BF16:
         return launch_self_attention(
             reinterpret_cast<__nv_bfloat16 *>(attn),
             reinterpret_cast<const __nv_bfloat16 *>(q),
             reinterpret_cast<const __nv_bfloat16 *>(k),
             reinterpret_cast<const __nv_bfloat16 *>(v),
-            scale, seq, nh, d, sk, nh_kv, dv);
+            scale, seq, nh, d, sk, nh_kv, dv, s);
     default:
         throw std::runtime_error("self_attention_cuda: unsupported dtype");
     }

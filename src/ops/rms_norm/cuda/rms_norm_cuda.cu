@@ -165,7 +165,7 @@ __global__ void rms_norm_kernel_scalar(T *__restrict__ out,
 // ── Launch helper ───────────────────────────────────────────────────────────
 template <typename T>
 void launch_rms_norm(T *out, const T *in, const T *weight,
-                     float eps, size_t M, size_t N) {
+                     float eps, size_t M, size_t N, cudaStream_t stream) {
     constexpr int VEC = 16 / static_cast<int>(sizeof(T)); // 4 (f32) or 8 (f16/bf16)
 
     if (N >= static_cast<size_t>(VEC) && (N % VEC) == 0) {
@@ -175,7 +175,7 @@ void launch_rms_norm(T *out, const T *in, const T *weight,
         block = (block + 31) & ~31;
         if (block < 32) block = 32;
 
-        rms_norm_kernel_vec<<<static_cast<int>(M), block>>>(
+        rms_norm_kernel_vec<<<static_cast<int>(M), block, 0, stream>>>(
             out, in, weight, eps, static_cast<unsigned int>(N));
     } else {
         // ── scalar fallback ─────────────────────────────────────────────────
@@ -183,7 +183,7 @@ void launch_rms_norm(T *out, const T *in, const T *weight,
         block = (block + 31) & ~31;
         if (block < 32) block = 32;
 
-        rms_norm_kernel_scalar<<<static_cast<int>(M), block>>>(
+        rms_norm_kernel_scalar<<<static_cast<int>(M), block, 0, stream>>>(
             out, in, weight, eps, static_cast<unsigned int>(N));
     }
     CUDA_CHECK(cudaGetLastError());
@@ -193,26 +193,27 @@ void launch_rms_norm(T *out, const T *in, const T *weight,
 
 namespace llaisys::ops::cuda {
 void rms_norm(std::byte *out, const std::byte *in, const std::byte *weight,
-              float eps, llaisysDataType_t dtype, std::array<size_t, 2> dims) {
+              float eps, llaisysDataType_t dtype, std::array<size_t, 2> dims, llaisysStream_t stream) {
     size_t M = dims[0]; // number of rows (tokens / batch)
     size_t N = dims[1]; // row width (hidden dim)
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
 
     switch (dtype) {
     case LLAISYS_DTYPE_F32:
         return launch_rms_norm(reinterpret_cast<float *>(out),
                                reinterpret_cast<const float *>(in),
                                reinterpret_cast<const float *>(weight),
-                               eps, M, N);
+                               eps, M, N, s);
     case LLAISYS_DTYPE_F16:
         return launch_rms_norm(reinterpret_cast<__half *>(out),
                                reinterpret_cast<const __half *>(in),
                                reinterpret_cast<const __half *>(weight),
-                               eps, M, N);
+                               eps, M, N, s);
     case LLAISYS_DTYPE_BF16:
         return launch_rms_norm(reinterpret_cast<__nv_bfloat16 *>(out),
                                reinterpret_cast<const __nv_bfloat16 *>(in),
                                reinterpret_cast<const __nv_bfloat16 *>(weight),
-                               eps, M, N);
+                               eps, M, N, s);
     default:
         throw std::runtime_error("rms_norm_cuda: unsupported dtype");
     }

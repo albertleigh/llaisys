@@ -14,7 +14,7 @@ import time
 
 class Qwen2:
 
-    def __init__(self, model_path, device: DeviceType = DeviceType.CPU):
+    def __init__(self, model_path, device: DeviceType = DeviceType.CPU, max_ctx_len: int = 2048):
         self.model_path = Path(model_path)
         self.device = device
 
@@ -24,14 +24,19 @@ class Qwen2:
 
         # 2. Populate Meta
         self.meta = LlaisysQwen2Meta()
-        self.meta.dtype = DataType.F32.value
+        # Use the model's native dtype (typically bfloat16) instead of F32
+        torch_dtype_str = self.config.get("torch_dtype", "float32")
+        dtype_map = {"bfloat16": DataType.BF16, "float16": DataType.F16, "float32": DataType.F32}
+        self.meta.dtype = dtype_map.get(torch_dtype_str, DataType.F32).value
         self.meta.nlayer = self.config["num_hidden_layers"]
         self.meta.hs = self.config["hidden_size"]
         self.meta.nh = self.config["num_attention_heads"]
         self.meta.nkvh = self.config["num_key_value_heads"]
         self.meta.dh = self.meta.hs // self.meta.nh
         self.meta.di = self.config["intermediate_size"]
-        self.meta.maxseq = self.config["max_position_embeddings"]
+        # Cap KV cache size to avoid exceeding GPU memory
+        model_maxseq = self.config["max_position_embeddings"]
+        self.meta.maxseq = min(model_maxseq, max_ctx_len)
         self.meta.voc = self.config["vocab_size"]
         self.meta.epsilon = self.config["rms_norm_eps"]
         self.meta.theta = self.config.get("rope_theta", 1000000.0)
@@ -79,8 +84,10 @@ class Qwen2:
     def _torch_to_llaisys_tensor(tensor: torch.Tensor, device: DeviceType) -> Tensor:
         cpu_tensor = tensor.detach().cpu().contiguous()
 
-        if cpu_tensor.is_floating_point():
-            cpu_tensor = cpu_tensor.to(torch.float32)
+        # Keep native dtype (typically bfloat16) — do NOT convert to float32
+        # The C++ CUDA kernels support BF16 natively via tensor cores
+        # if cpu_tensor.is_floating_point():
+        #     cpu_tensor = cpu_tensor.to(torch.float32)
 
         if torch.isnan(cpu_tensor).any():
             print(f"Warning: Computed tensor contains NaN! dtype={cpu_tensor.dtype}")

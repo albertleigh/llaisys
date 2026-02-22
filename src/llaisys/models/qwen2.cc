@@ -207,10 +207,11 @@ int64_t llaisysQwen2ModelInfer(LlaisysQwen2Model *model, int64_t *token_ids, siz
                     std::memcpy(dst_v_base + cache_idx * row_size_bytes, src_v_base + t * row_size_bytes, row_size_bytes);
                 } else {
                     core::context().setDevice(model->device_type, 0);
-                    core::context().runtime().api()->memcpy_sync(
-                        dst_k_base + cache_idx * row_size_bytes, src_k_base + t * row_size_bytes, row_size_bytes, LLAISYS_MEMCPY_D2D);
-                    core::context().runtime().api()->memcpy_sync(
-                        dst_v_base + cache_idx * row_size_bytes, src_v_base + t * row_size_bytes, row_size_bytes, LLAISYS_MEMCPY_D2D);
+                    llaisysStream_t stream = core::context().runtime().stream();
+                    core::context().runtime().api()->memcpy_async(
+                        dst_k_base + cache_idx * row_size_bytes, src_k_base + t * row_size_bytes, row_size_bytes, LLAISYS_MEMCPY_D2D, stream);
+                    core::context().runtime().api()->memcpy_async(
+                        dst_v_base + cache_idx * row_size_bytes, src_v_base + t * row_size_bytes, row_size_bytes, LLAISYS_MEMCPY_D2D, stream);
                 }
             }
         }
@@ -284,8 +285,8 @@ int64_t llaisysQwen2ModelInfer(LlaisysQwen2Model *model, int64_t *token_ids, siz
         std::memcpy(dst_ptr, src_ptr + (ntoken - 1) * d_bytes, d_bytes);
     } else {
         core::context().setDevice(model->device_type, 0);
-        core::context().runtime().api()->memcpy_sync(
-            dst_ptr, src_ptr + (ntoken - 1) * d_bytes, d_bytes, LLAISYS_MEMCPY_D2D);
+        core::context().runtime().api()->memcpy_async(
+            dst_ptr, src_ptr + (ntoken - 1) * d_bytes, d_bytes, LLAISYS_MEMCPY_D2D, core::context().runtime().stream());
     }
 
     tensor_t logits = create_tensor({1, static_cast<int64_t>(model->meta.voc)}, hidden_states->dtype(), model->device_type);
@@ -301,6 +302,8 @@ int64_t llaisysQwen2ModelInfer(LlaisysQwen2Model *model, int64_t *token_ids, siz
         next_token = *reinterpret_cast<int64_t *>(max_idx->data());
     } else {
         core::context().setDevice(model->device_type, 0);
+        // Synchronize the stream before reading result back to host
+        core::context().runtime().synchronize();
         core::context().runtime().api()->memcpy_sync(
             &next_token, max_idx->data(), sizeof(int64_t), LLAISYS_MEMCPY_D2H);
     }
