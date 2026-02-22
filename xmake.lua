@@ -133,26 +133,53 @@ target("llaisys")
                 raise("nvcc not found!")
             end
 
-            -- Collect all .cu.o files from CUDA static lib dependencies
+            -- Collect all .cu object files from CUDA static lib dependencies
+            -- Windows: .cu.obj, Linux: .cu.o
             local cu_objects = {}
+            local is_win = target:is_plat("windows")
+            local obj_pattern = is_win and "%.cu%.obj$" or "%.cu%.o$"
+
+            -- On Windows, nvcc needs -ccbin to locate cl.exe
+            local ccbin_dir = nil
+            if is_win then
+                local cl = find_tool("cl")
+                if cl then
+                    ccbin_dir = path.directory(cl.program)
+                end
+            end
             for _, dep in ipairs(target:orderdeps()) do
                 for _, obj in ipairs(dep:objectfiles()) do
-                    if obj:match("%.cu%.o$") then
+                    if obj:match(obj_pattern) then
                         table.insert(cu_objects, obj)
                     end
                 end
             end
 
             if #cu_objects > 0 then
-                local dlink_obj = path.join(target:objectdir(), "cuda_dlink.o")
-                local argv = {"-dlink", "-shared",
-                              "-gencode", "arch=compute_86,code=sm_86",
-                              "-o", dlink_obj}
+                local dlink_ext = is_win and ".obj" or ".o"
+                local dlink_obj = path.join(target:objectdir(), "cuda_dlink" .. dlink_ext)
+                local argv = {"-dlink"}
+                if not is_win then
+                    table.insert(argv, "-shared")
+                end
+                table.insert(argv, "-gencode")
+                table.insert(argv, "arch=compute_86,code=sm_86")
+                -- Match MSVC dynamic CRT in device-link step
+                if is_win then
+                    table.insert(argv, "-Xcompiler")
+                    table.insert(argv, "/MD")
+                    if ccbin_dir then
+                        table.insert(argv, "-ccbin")
+                        table.insert(argv, ccbin_dir)
+                    end
+                end
+                table.insert(argv, "-o")
+                table.insert(argv, dlink_obj)
                 for _, obj in ipairs(cu_objects) do
                     table.insert(argv, obj)
                 end
                 os.vrunv(nvcc.program, argv)
-                -- Insert device-link object at the front so g++ includes it
+                -- Insert device-link object at the front so the linker includes it
                 local objs = target:objectfiles()
                 table.insert(objs, 1, dlink_obj)
                 target:set("objectfiles", objs)
@@ -163,10 +190,13 @@ target("llaisys")
     -- BLAS linking
     if has_config("mkl") then
         -- Intel MKL linking
-        local mkl_root = os.getenv("MKLROOT") or "/opt/intel/oneapi/mkl/latest"
-        local mkl_lib = path.join(mkl_root, "lib", "intel64")
+        local mkl_default = is_plat("windows")
+            and "C:/Program Files (x86)/Intel/oneAPI/mkl/latest"
+            or  "/opt/intel/oneapi/mkl/latest"
+        local mkl_root = os.getenv("MKLROOT") or mkl_default
 
         if not is_plat("windows") then
+            local mkl_lib = path.join(mkl_root, "lib", "intel64")
             add_ldflags("-fopenmp")
             add_syslinks("gomp")
 
@@ -181,17 +211,22 @@ target("llaisys")
         else
             add_ldflags("/openmp")
             add_linkdirs(path.join(mkl_root, "lib"))
-            add_links("mkl_intel_lp64", "mkl_intel_thread", "mkl_core")
+            -- Intel OpenMP runtime (libiomp5md) is required by mkl_intel_thread
+            local compiler_default = "C:/Program Files (x86)/Intel/oneAPI/compiler/latest"
+            local compiler_root = os.getenv("CMPLR_ROOT") or compiler_default
+            add_linkdirs(path.join(compiler_root, "lib"))
+            add_links("mkl_intel_lp64", "mkl_intel_thread", "mkl_core", "libiomp5md")
         end
     else
-        -- OpenBLAS linking (fallback)
-        local vcpkg_root = os.getenv("VCPKG_ROOT") or (is_plat("windows") and "C:/opt/vcpkg" or "~/opt/vcpkg")
+        -- OpenBLAS linking (vcpkg manifest mode)
+        local triplet = is_plat("windows") and "x64-windows" or "x64-linux"
+        local vcpkg_lib = path.join(os.projectdir(), "vcpkg_installed", triplet, "lib")
 
         if not is_plat("windows") then
             add_ldflags("-fopenmp")
             add_syslinks("gomp")
 
-            add_linkdirs(path.join(vcpkg_root, "installed/x64-linux/lib"))
+            add_linkdirs(vcpkg_lib)
 
             add_ldflags("-Wl,--whole-archive")
             add_links("openblas")
@@ -200,7 +235,7 @@ target("llaisys")
             add_syslinks("pthread", "gfortran")
         else
             add_ldflags("/openmp")
-            add_linkdirs(path.join(vcpkg_root, "installed/x64-windows/lib"))
+            add_linkdirs(vcpkg_lib)
             add_links("openblas")
         end
     end
@@ -215,10 +250,17 @@ target("llaisys")
 
     -- CUDA runtime linking
     if has_config("nv-gpu") then
-        add_links("cudart")
-        -- Force NEEDED entry for cublas/cublasLt: symbols are called from static
-        -- .cu objects so --as-needed (the default) would drop the dependency.
-        add_shflags("-Wl,--no-as-needed", "-lcublas", "-lcublasLt", "-Wl,--as-needed", {force = true})
+        if not is_plat("windows") then
+            add_links("cudart")
+            -- Force NEEDED entry for cublas/cublasLt: symbols are called from static
+            -- .cu objects so --as-needed (the default) would drop the dependency.
+            add_shflags("-Wl,--no-as-needed", "-lcublas", "-lcublasLt", "-Wl,--as-needed", {force = true})
+        else
+            -- On Windows, use standard link directives with CUDA toolkit path
+            local cuda_path = os.getenv("CUDA_PATH") or "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1"
+            add_linkdirs(path.join(cuda_path, "lib/x64"))
+            add_links("cudart", "cublas", "cublasLt")
+        end
     end
     
     after_install(function (target)

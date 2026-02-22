@@ -18,6 +18,22 @@
         }                                                                                                               \
     } while (0)
 
+// On MSVC / Windows, C++ static destructors can run after the CUDA
+// driver has begun tearing down, making cleanup calls return
+// cudaErrorCudartUnloading.  This is harmless — silently ignore it.
+#ifdef _MSC_VER
+#define CUDA_CHECK_SHUTDOWN(call)                                                                                        \
+    do {                                                                                                                \
+        cudaError_t error = call;                                                                                       \
+        if (error != cudaSuccess && error != cudaErrorCudartUnloading) {                                                \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__ << " - " << cudaGetErrorString(error) << "\n"; \
+            throw std::runtime_error(cudaGetErrorString(error));                                                        \
+        }                                                                                                               \
+    } while (0)
+#else
+#define CUDA_CHECK_SHUTDOWN(call) CUDA_CHECK(call)
+#endif
+
 #define CUDA_FREE(ptr)                                                                                                           \
     do {                                                                                                                         \
         if (ptr) {                                                                                                               \

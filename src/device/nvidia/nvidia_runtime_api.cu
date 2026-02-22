@@ -46,7 +46,7 @@ llaisysStream_t createStream() {
 }
 
 void destroyStream(llaisysStream_t stream) {
-    CUDA_CHECK(cudaStreamDestroy(reinterpret_cast<cudaStream_t>(stream)));
+    CUDA_CHECK_SHUTDOWN(cudaStreamDestroy(reinterpret_cast<cudaStream_t>(stream)));
 }
 
 void streamSynchronize(llaisysStream_t stream) {
@@ -60,7 +60,7 @@ void *mallocDevice(size_t size) {
 }
 
 void freeDevice(void *ptr) {
-    CUDA_CHECK(cudaFree(ptr));
+    CUDA_CHECK_SHUTDOWN(cudaFree(ptr));
 }
 
 void *mallocHost(size_t size) {
@@ -70,7 +70,7 @@ void *mallocHost(size_t size) {
 }
 
 void freeHost(void *ptr) {
-    CUDA_CHECK(cudaFreeHost(ptr));
+    CUDA_CHECK_SHUTDOWN(cudaFreeHost(ptr));
 }
 
 void memcpySync(void *dst, const void *src, size_t size, llaisysMemcpyKind_t kind) {

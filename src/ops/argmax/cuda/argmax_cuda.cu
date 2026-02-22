@@ -9,6 +9,14 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 
+// MSVC does not define the GCC built-in __FLT_MAX__
+#ifdef _MSC_VER
+#include <cfloat>
+#ifndef __FLT_MAX__
+#define __FLT_MAX__ FLT_MAX
+#endif
+#endif
+
 #include "../../../cuda_utils/check.cuh"
 #include "../../../cuda_utils/types.cuh"
 #include "../../../utils.hpp"

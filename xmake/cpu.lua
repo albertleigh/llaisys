@@ -35,17 +35,24 @@ target("llaisys-ops-cpu")
 
     if has_config("mkl") then
         -- Intel MKL (preferred when available)
-        local mkl_root = os.getenv("MKLROOT") or "/opt/intel/oneapi/mkl/latest"
+        local mkl_default = is_plat("windows")
+            and "C:/Program Files (x86)/Intel/oneAPI/mkl/latest"
+            or  "/opt/intel/oneapi/mkl/latest"
+        local mkl_root = os.getenv("MKLROOT") or mkl_default
         add_defines("ENABLE_MKL")
         add_includedirs(path.join(mkl_root, "include"))
-        add_linkdirs(path.join(mkl_root, "lib", "intel64"))
+        if is_plat("windows") then
+            add_linkdirs(path.join(mkl_root, "lib"))
+        else
+            add_linkdirs(path.join(mkl_root, "lib", "intel64"))
+        end
     else
-        -- Fallback to OpenBLAS from vcpkg
-        local vcpkg_root = os.getenv("VCPKG_ROOT") or (is_plat("windows") and "C:/opt/vcpkg" or "~/opt/vcpkg")
+        -- OpenBLAS from vcpkg manifest mode (<project>/vcpkg_installed/<triplet>)
         local triplet = is_plat("windows") and "x64-windows" or "x64-linux"
+        local vcpkg_dir = path.join(os.projectdir(), "vcpkg_installed", triplet)
 
-        add_includedirs(path.join(vcpkg_root, "installed", triplet, "include"))
-        add_linkdirs(path.join(vcpkg_root, "installed", triplet, "lib"))
+        add_includedirs(path.join(vcpkg_dir, "include"))
+        add_linkdirs(path.join(vcpkg_dir, "lib"))
         add_links("openblas")
     end
 

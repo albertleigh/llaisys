@@ -5,6 +5,7 @@
 #include "argmax_cpu.hpp"
 
 #include "../../../utils.hpp"
+#include "../../../utils/omp_compat.hpp"
 
 #include <limits>
 
@@ -49,11 +50,11 @@ void argmax_(size_t *max_idx, T *max_val, const T *vals, size_t numel) {
                 size_t local_max_index = 0;
                 float local_max_value = std::numeric_limits<float>::lowest();
 
-                #pragma omp for nowait
-                for (size_t i = 0; i < numel; ++i) {
+                OMP_FOR_NOWAIT
+                for (omp_idx_t i = 0; i < OMP_CAST(numel); ++i) {
                     const float current_value = llaisys::utils::cast<float>(vals[i]);
                     if (current_value > local_max_value) {
-                        local_max_index = i;
+                        local_max_index = static_cast<size_t>(i);
                         local_max_value = current_value;
                     }
                 }
@@ -74,11 +75,11 @@ void argmax_(size_t *max_idx, T *max_val, const T *vals, size_t numel) {
                 size_t local_max_index = 0;
                 float local_max_value = std::numeric_limits<float>::lowest();
 
-                #pragma omp for nowait
-                for (size_t i = 0; i < numel; ++i) {
+                OMP_FOR_NOWAIT
+                for (omp_idx_t i = 0; i < OMP_CAST(numel); ++i) {
                     const float current_value = static_cast<float>(vals[i]);
                     if (current_value > local_max_value) {
-                        local_max_index = i;
+                        local_max_index = static_cast<size_t>(i);
                         local_max_value = current_value;
                     }
                 }

@@ -15,6 +15,13 @@ target("llaisys-device-nvidia")
     if not is_plat("windows") then
         add_cxflags("-fPIC", "-Wno-unknown-pragmas")
         add_cuflags("--compiler-options", "-fPIC", {force = true})
+    else
+        -- Match MSVC dynamic CRT used by C++ targets
+        if is_mode("debug") then
+            add_cuflags("-Xcompiler", "/MDd", {force = true})
+        else
+            add_cuflags("-Xcompiler", "/MD", {force = true})
+        end
     end
 
     add_files("../src/device/nvidia/*.cu")
@@ -45,6 +52,13 @@ target("llaisys-ops-cuda")
     if not is_plat("windows") then
         add_cxflags("-fPIC", "-Wno-unknown-pragmas")
         add_cuflags("--compiler-options", "-fPIC", {force = true})
+    else
+        -- Match MSVC dynamic CRT used by C++ targets
+        if is_mode("debug") then
+            add_cuflags("-Xcompiler", "/MDd", {force = true})
+        else
+            add_cuflags("-Xcompiler", "/MD", {force = true})
+        end
     end
 
     add_files("../src/cuda_utils/*.cu")

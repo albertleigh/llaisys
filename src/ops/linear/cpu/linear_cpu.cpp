@@ -4,10 +4,10 @@
 
 #include "linear_cpu.hpp"
 #include "../../../utils.hpp"
+#include "../../../utils/omp_compat.hpp"
 #include "llaisys.h"
 
 #include <array>
-#include <cstddef>
 #include <cstring>
 #include <vector>
 
@@ -52,15 +52,15 @@ template <typename T>
 static void linear_blocked_half_(T *out, const T *in, const T *weight, const T *bias, size_t M, size_t K, size_t N) {
     // Initialize output with bias
     if (bias != nullptr) {
-#pragma omp parallel for collapse(2)
-        for (size_t i = 0; i < M; ++i) {
-            for (size_t j = 0; j < N; ++j) {
+        OMP_PARALLEL_FOR_COLLAPSE2
+        for (omp_idx_t i = 0; i < OMP_CAST(M); ++i) {
+            for (omp_idx_t j = 0; j < OMP_CAST(N); ++j) {
                 out[i * N + j] = bias[j];
             }
         }
     } else {
-#pragma omp parallel for
-        for (size_t i = 0; i < M; ++i) {
+        OMP_PARALLEL_FOR
+        for (omp_idx_t i = 0; i < OMP_CAST(M); ++i) {
             std::memset(out + i * N, 0, N * sizeof(T));
         }
     }
@@ -70,9 +70,22 @@ static void linear_blocked_half_(T *out, const T *in, const T *weight, const T *
     constexpr size_t BLOCK_J = 64;
     constexpr size_t BLOCK_K = 256;
 
+#ifdef _MSC_VER
+    // MSVC: no collapse – flatten the 2D block grid into a single loop
+    const ptrdiff_t n_blocks_i = static_cast<ptrdiff_t>((M + BLOCK_I - 1) / BLOCK_I);
+    const ptrdiff_t n_blocks_j = static_cast<ptrdiff_t>((N + BLOCK_J - 1) / BLOCK_J);
+    const ptrdiff_t total_blocks = n_blocks_i * n_blocks_j;
+
+#pragma omp parallel for
+    for (ptrdiff_t block_idx = 0; block_idx < total_blocks; ++block_idx) {
+        const size_t ii = static_cast<size_t>(block_idx / n_blocks_j) * BLOCK_I;
+        const size_t jj = static_cast<size_t>(block_idx % n_blocks_j) * BLOCK_J;
+#else
+    // GCC / Clang: use collapse(2) over 2D block grid
 #pragma omp parallel for collapse(2)
     for (size_t ii = 0; ii < M; ii += BLOCK_I) {
         for (size_t jj = 0; jj < N; jj += BLOCK_J) {
+#endif
             size_t i_end = (ii + BLOCK_I < M) ? ii + BLOCK_I : M;
             size_t j_end = (jj + BLOCK_J < N) ? jj + BLOCK_J : N;
 
@@ -94,7 +107,7 @@ static void linear_blocked_half_(T *out, const T *in, const T *weight, const T *
                     for (size_t k = kk; k < k_end; ++k) {
                         float in_val = utils::cast<float>(in[i * K + k]);
                         // Vectorizable inner loop
-#pragma omp simd
+                        OMP_SIMD
                         for (size_t j = jj; j < j_end; ++j) {
                             float w_val = utils::cast<float>(weight[j * K + k]);
                             acc_buffer[(i - ii) * BLOCK_J + (j - jj)] += in_val * w_val;
@@ -108,8 +121,12 @@ static void linear_blocked_half_(T *out, const T *in, const T *weight, const T *
                     out[i * N + j] = utils::cast<T>(acc_buffer[(i - ii) * BLOCK_J + (j - jj)]);
                 }
             }
+#ifdef _MSC_VER
+    }
+#else
         }
     }
+#endif
 }
 
 // ─── Main linear dispatch ───────────────────────────────────────────────────
@@ -136,9 +153,9 @@ void linear_(T *out, const T *in, const T *weight, const T *bias, std::array<siz
                     0.0f, out, static_cast<int>(N));
 
         if (bias != nullptr) {
-#pragma omp parallel for collapse(2)
-            for (size_t i = 0; i < M; ++i) {
-                for (size_t j = 0; j < N; ++j) {
+            OMP_PARALLEL_FOR_COLLAPSE2
+            for (omp_idx_t i = 0; i < OMP_CAST(M); ++i) {
+                for (omp_idx_t j = 0; j < OMP_CAST(N); ++j) {
                     out[i * N + j] += bias[j];
                 }
             }
@@ -170,9 +187,9 @@ void linear_(T *out, const T *in, const T *weight, const T *bias, std::array<siz
                     beta, c, static_cast<MKL_INT>(N));
 
         if (bias != nullptr) {
-#pragma omp parallel for collapse(2)
-            for (size_t i = 0; i < M; ++i) {
-                for (size_t j = 0; j < N; ++j) {
+            OMP_PARALLEL_FOR_COLLAPSE2
+            for (omp_idx_t i = 0; i < OMP_CAST(M); ++i) {
+                for (omp_idx_t j = 0; j < OMP_CAST(N); ++j) {
                     // Add bias in float, write back as fp16
                     float val = utils::cast<float>(out[i * N + j]) + utils::cast<float>(bias[j]);
                     out[i * N + j] = utils::cast<T>(val);
@@ -197,9 +214,9 @@ void linear_(T *out, const T *in, const T *weight, const T *bias, std::array<siz
                                0.0f, c_f32.data(), static_cast<MKL_INT>(N));
 
 // Convert f32 result back to bf16, adding bias
-#pragma omp parallel for collapse(2)
-        for (size_t i = 0; i < M; ++i) {
-            for (size_t j = 0; j < N; ++j) {
+        OMP_PARALLEL_FOR_COLLAPSE2
+        for (omp_idx_t i = 0; i < OMP_CAST(M); ++i) {
+            for (omp_idx_t j = 0; j < OMP_CAST(N); ++j) {
                 float val = c_f32[i * N + j];
                 if (bias != nullptr) {
                     val += utils::cast<float>(bias[j]);
