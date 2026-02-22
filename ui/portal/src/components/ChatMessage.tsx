@@ -63,7 +63,11 @@ export function ChatMessageBubble({
   }, [message.content]);
 
   return (
-    <div className={`flex gap-3 py-5 ${isUser ? "" : ""} group`}>
+    <div
+      className={`flex gap-3 py-5 group ${
+        isUser ? "flex-row-reverse" : ""
+      }`}
+    >
       {/* Avatar */}
       <div className="shrink-0 pt-0.5">
         {isUser ? (
@@ -74,11 +78,19 @@ export function ChatMessageBubble({
       </div>
 
       {/* Content area */}
-      <div className="flex-1 min-w-0">
-        {/* Role label */}
-        <div className="text-xs font-semibold mb-1.5 text-text">
-          {isUser ? "You" : "LLAISYS"}
-        </div>
+      <div
+        className={`min-w-0 ${
+          isUser
+            ? "max-w-[75%] bg-surface-alt rounded-2xl px-4 py-3"
+            : "flex-1"
+        }`}
+      >
+        {/* Role label — AI only */}
+        {!isUser && (
+          <div className="text-xs font-semibold mb-1.5 text-text">
+            LLAISYS
+          </div>
+        )}
 
         {/* Content or editor */}
         {isEditing ? (
@@ -126,7 +138,11 @@ export function ChatMessageBubble({
 
             {/* Action toolbar — appears on hover */}
             {!isStreaming && (
-              <div className="flex items-center gap-0.5 mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
+              <div
+                className={`flex items-center gap-0.5 mt-2 opacity-0 group-hover:opacity-100 transition-opacity ${
+                  isUser ? "justify-end" : ""
+                }`}
+              >
                 {/* Copy */}
                 <button
                   onClick={() => void handleCopy()}
