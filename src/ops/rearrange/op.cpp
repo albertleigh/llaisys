@@ -1,5 +1,8 @@
 #include "op.hpp"
 #include "cpu/rearrange_cpu.hpp"
+#ifdef ENABLE_NVIDIA_API
+#include "cuda/rearrange_cuda.cuh"
+#endif
 
 namespace llaisys::ops {
 void rearrange(tensor_t out, tensor_t in) {
@@ -19,8 +22,7 @@ void rearrange(tensor_t out, tensor_t in) {
         return cpu::rearrange(out->data(), in->data(), out->dtype(), out->shape(), stride_in, stride_out);
 #ifdef ENABLE_NVIDIA_API
     case LLAISYS_DEVICE_NVIDIA:
-        TO_BE_IMPLEMENTED();
-        return;
+    return cuda::rearrange(out->data(), in->data(), out->dtype(), out->shape(), stride_in, stride_out);
 #endif
     default:
         EXCEPTION_UNSUPPORTED_DEVICE;
