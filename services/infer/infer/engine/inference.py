@@ -1,11 +1,25 @@
 """Inference engine — wraps llaisys.models.Qwen2 + HuggingFace tokenizer.
 
-This module integrates with :class:`RequestPool` and
-:class:`BatchScheduler` so that multiple callers can submit inference
-requests concurrently.  A background ``asyncio.Task`` continuously
-pulls batches from the pool, runs them through the C backend (one
-inference step at a time), and delivers tokens to each caller via
-per-request ``asyncio.Queue`` channels.
+This module integrates with :class:`RequestPool`,
+:class:`BatchScheduler`, and :class:`KVCachePool` so that multiple
+callers can submit inference requests concurrently.  A background
+``asyncio.Task`` continuously pulls batches from the pool, runs them
+through the C backend (one inference step at a time per request, with
+KV-cache swap), and delivers tokens to each caller via per-request
+``asyncio.Queue`` channels.
+
+Per-request KV cache management
+--------------------------------
+Each request is bound to a :class:`KVSlot` that holds its own KV cache
+state.  Before running inference for a request, the engine swaps the
+slot's KV cache into the model and restores its position.  After the
+step, the updated KV state is saved back to the slot.
+
+Prefix matching
+---------------
+When a new request arrives, the KV cache pool searches for a free slot
+whose token prefix matches the new prompt.  If found, the prompt
+tokens already in the cache are skipped (only new tokens are processed).
 """
 
 from __future__ import annotations
@@ -24,6 +38,7 @@ import llaisys
 from .pool import RequestPool
 from .request import InferRequest, RequestStatus, StreamToken
 from .scheduler import BatchScheduler
+from .kv_cache_pool import KVCachePool, KVSlot
 
 logger = logging.getLogger(__name__)
 
@@ -37,18 +52,20 @@ if hasattr(llaisys.DeviceType, "NVIDIA"):
 
 
 class InferenceEngine:
-    """Async inference engine backed by a request pool and batch scheduler.
+    """Async inference engine backed by a request pool, batch scheduler,
+    and KV-cache pool with prefix matching.
 
     Lifecycle
     ---------
-    1. ``__init__``  — load model + tokenizer, create pool & scheduler.
+    1. ``__init__``  — load model + tokenizer, create pool, scheduler,
+       and KV cache pool.
     2. ``await start()`` — launch the background inference loop.
     3. ``submit(request)`` — enqueue an :class:`InferRequest`.
        The caller then reads from ``request.output`` to get tokens.
     4. ``await stop()``  — cancel the background loop on shutdown.
 
-    The old ``generate()`` / ``generate_stream()`` convenience methods
-    are still available — they now go through the pool internally.
+    The ``generate()`` / ``generate_stream()`` convenience methods
+    go through the pool internally.
     """
 
     def __init__(
@@ -80,6 +97,15 @@ class InferenceEngine:
             self.pool, max_batch_size=max_batch_size
         )
 
+        # ── KV cache pool ───────────────────────────────────────────
+        # One slot per concurrent request in a batch, plus a few
+        # extra for caching prefixes of recently finished requests.
+        kv_pool_size = max(max_batch_size * 2, 8)
+        self.kv_pool = KVCachePool(
+            max_slots=kv_pool_size,
+            free_fn=self.model.free_kv_snapshot,
+        )
+
         # ── Background loop state ──────────────────────────────────
         self._loop_task: asyncio.Task | None = None
         self._running = False
@@ -95,7 +121,9 @@ class InferenceEngine:
             self._inference_loop(), name="inference-loop"
         )
         logger.info(
-            "Inference loop started (max_batch=%d)", self.scheduler.max_batch_size
+            "Inference loop started (max_batch=%d, kv_slots=%d)",
+            self.scheduler.max_batch_size,
+            self.kv_pool._max_slots,
         )
 
     async def stop(self) -> None:
@@ -153,6 +181,7 @@ class InferenceEngine:
         top_p: float = 0.8,
         temperature: float = 0.8,
         stream: bool = False,
+        conversation_id: str = "",
     ) -> InferRequest:
         """Create an :class:`InferRequest` from chat messages and submit it."""
         input_ids = self._apply_chat_template(messages)
@@ -164,8 +193,27 @@ class InferenceEngine:
             top_p=top_p,
             temperature=temperature,
             stream=stream,
+            conversation_id=conversation_id,
         )
         return self.submit(req)
+
+    # ── KV cache swap helpers ────────────────────────────────────────
+
+    def _swap_in_kv(self, slot: KVSlot) -> None:
+        """Restore a slot's KV cache snapshot from CPU → device memory."""
+        if slot.kv_snapshot is not None:
+            self.model.restore_kv_state(slot.kv_snapshot)
+        else:
+            # Fresh slot — reset model KV cache
+            self.model.reset_kv_cache()
+
+    def _swap_out_kv(self, slot: KVSlot, token_ids: list[int]) -> None:
+        """Copy the model's device KV cache → CPU snapshot, then reset device."""
+        kv_snapshot = self.model.save_kv_state()
+        pos = self.model.get_snapshot_pos(kv_snapshot)
+        self.kv_pool.update_slot(slot, token_ids, kv_snapshot, pos=pos)
+        # Reset device KV cache to free device memory
+        self.model.reset_kv_cache()
 
     # ── Background inference loop ────────────────────────────────────
 
@@ -174,6 +222,12 @@ class InferenceEngine:
 
         This is the heart of the serving system.  It runs as a single
         ``asyncio.Task`` for the lifetime of the server.
+
+        Each batch iteration:
+        1. Pull a batch of requests from the pool.
+        2. For each request, acquire a KV cache slot (with prefix matching).
+        3. Process each request for one step (swapping KV caches in/out).
+        4. Deliver tokens, return unfinished requests to pool.
         """
         logger.info("Inference loop running …")
         try:
@@ -192,28 +246,20 @@ class InferenceEngine:
             raise
 
     async def _process_batch(self, batch: list[InferRequest]) -> None:
-        """Process a batch of requests.
+        """Process a batch of requests with per-request KV cache management.
 
-        **Current behaviour** (single KV-cache in C backend):
-        Each request is processed to completion sequentially.  This is
-        safe and correct, and the pool / scheduler infrastructure is
-        fully exercised.
+        Each request in the batch is processed to completion sequentially,
+        with its own KV cache slot.  The model's KV cache is swapped
+        in/out between requests.
 
-        **Future upgrade path** (per-request KV caches + batched matmul):
-        Replace the sequential loop with true iteration-level batching::
-
-            while batch:
-                tokens = batched_infer_step(batch)   # one step, all reqs
-                for req, tok in zip(batch, tokens):
-                    deliver(req, tok)
-                    if req.is_done: batch.remove(req)
-                # Optionally pull new requests from pool between iters
+        Continuous batching: after processing each request for one complete
+        generation, the slot is released and the next request is picked up.
         """
         for request in batch:
             await self._process_single_request(request)
 
     async def _process_single_request(self, request: InferRequest) -> None:
-        """Run step-by-step inference for one request.
+        """Run step-by-step inference for one request with KV cache slot.
 
         Each C-level inference step is offloaded to a thread so the
         event loop stays responsive.  Tokens are delivered to the
@@ -222,11 +268,60 @@ class InferenceEngine:
         """
         loop = asyncio.get_running_loop()
         end_token = self.model.meta.end_token
-        tokenizer = self.tokenizer  # HuggingFace tokenizer (Rust, thread-safe)
+        tokenizer = self.tokenizer
+
+        # Acquire a KV cache slot (with prefix matching)
+        try:
+            slot, prefix_len = self.kv_pool.acquire_slot(
+                request.conversation_id, request.input_ids
+            )
+        except RuntimeError as e:
+            logger.error("Failed to acquire KV slot for %s: %s", request.id, e)
+            err = StreamToken(error=str(e))
+            request.output.put_nowait(err)
+            self.pool.mark_completed(request)
+            return
+
+        request.kv_slot = slot
+        request.prefix_len = prefix_len
 
         def _run_generation() -> None:
             """Blocking function executed in the thread pool."""
-            next_input = list(request.input_ids)
+            # Swap in the slot's KV cache
+            self._swap_in_kv(slot)
+
+            # Determine which tokens to feed as initial input
+            if prefix_len > 0 and prefix_len < len(request.input_ids):
+                # Prefix match — only process tokens after the cached prefix.
+                # The snapshot may contain more tokens than the matching
+                # prefix (e.g. from a longer previous conversation), so
+                # we must rewind the model's position to prefix_len so
+                # that the non-matching tail is overwritten.
+                self.model.set_pos(prefix_len)
+                next_input = list(request.input_ids[prefix_len:])
+                logger.info(
+                    "Request %s: prefix match skip %d tokens, processing %d new prompt tokens",
+                    request.id, prefix_len, len(next_input),
+                )
+            elif prefix_len == len(request.input_ids):
+                # Exact match — the entire prompt is already in the cache,
+                # but we still need to run one step to get the next token.
+                # Feed the last token to trigger generation.
+                next_input = [request.input_ids[-1]]
+                # Adjust position back by 1 since we're re-processing the last token
+                current_pos = self.model.get_pos()
+                if current_pos > 0:
+                    self.model.set_pos(current_pos - 1)
+                logger.info(
+                    "Request %s: exact prefix match, re-running last token",
+                    request.id,
+                )
+            else:
+                # No prefix match — process entire prompt
+                next_input = list(request.input_ids)
+
+            # Track the full token sequence for prefix matching
+            all_tokens = list(request.input_ids)
 
             for step in range(request.max_tokens):
                 # ── Check cancellation ───────────────────────────────
@@ -238,6 +333,7 @@ class InferenceEngine:
                 # ── Single inference step (C backend) ────────────────
                 token_id = self.model.infer_step(next_input)
                 request.generated_ids.append(token_id)
+                all_tokens.append(token_id)
 
                 is_end = token_id == end_token
                 is_last = step == request.max_tokens - 1
@@ -279,11 +375,16 @@ class InferenceEngine:
             except Exception:
                 pass
         finally:
+            # Save KV state back to slot and release
+            try:
+                all_tokens = request.input_ids + request.generated_ids
+                self._swap_out_kv(slot, all_tokens)
+            except Exception:
+                logger.warning("Failed to save KV state for slot %d", slot.slot_id)
+            self.kv_pool.release_slot(slot)
             self.pool.mark_completed(request)
 
     # ── Convenience wrappers (backward-compatible) ───────────────────
-    # These go through the pool so they benefit from queuing &
-    # scheduling even when called directly.
 
     async def generate(
         self,
@@ -344,9 +445,17 @@ class InferenceEngine:
     # ── Pool diagnostics ─────────────────────────────────────────────
 
     def pool_stats(self) -> dict:
-        """Return a snapshot of pool + scheduler statistics."""
+        """Return a snapshot of pool, scheduler, and KV cache statistics."""
         return {
             **self.pool.stats(),
+            **self.kv_pool.stats(),
             "max_batch_size": self.scheduler.max_batch_size,
             "loop_running": self._running,
         }
+
+    def delete_conversation(self, conversation_id: str) -> int:
+        """Evict all KV-cache slots for a conversation, freeing CPU memory.
+
+        Returns the number of slots freed.
+        """
+        return self.kv_pool.evict_conversation(conversation_id)

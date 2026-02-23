@@ -1,2 +1,2 @@
-export { chatCompletion, chatCompletionStream } from "./chat";
+export { chatCompletion, chatCompletionStream, createServerConversation, deleteServerConversation } from "./chat";
 export type { ChatRequestOptions } from "./chat";

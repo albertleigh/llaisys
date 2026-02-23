@@ -80,6 +80,7 @@ export function ChatView() {
         for await (const chunk of chatCompletionStream({
           messages,
           signal: controller.signal,
+          conversationId: convId,
         })) {
           const delta = chunk.choices[0]?.delta;
           if (delta?.content) {
@@ -91,7 +92,7 @@ export function ChatView() {
           // User cancelled — that's fine.
         } else {
           const text = err instanceof Error ? err.message : "Unknown error";
-          appendToken(convId, assistantMsgId, `\n\n⚠️ Error: ${text}`);
+          appendToken(convId, assistantMsgId, `\n\n\u26a0\ufe0f Error: ${text}`);
         }
       } finally {
         setStreamingMsgId(null);
@@ -117,12 +118,12 @@ export function ChatView() {
   // ── Send handler ───────────────────────────────────────────────────────
 
   const handleSend = useCallback(
-    (text: string, overrideConvId?: ConversationId) => {
+    async (text: string, overrideConvId?: ConversationId) => {
       let convId = overrideConvId ?? activeId;
 
       // Create conversation if none is active.
       if (convId === null) {
-        convId = createConversation();
+        convId = await createConversation();
       }
 
       addUserMessage(convId, text);
@@ -234,8 +235,8 @@ export function ChatView() {
               {SUGGESTIONS.map((s) => (
                 <button
                   key={s.label}
-                  onClick={() => {
-                    const id = createConversation();
+                  onClick={async () => {
+                    const id = await createConversation();
                     // Small delay to let state settle, then send.
                     setTimeout(() => handleSend(s.prompt, id), 0);
                   }}
@@ -254,7 +255,7 @@ export function ChatView() {
             </div>
 
             <button
-              onClick={() => createConversation()}
+              onClick={() => void createConversation()}
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl
                          bg-primary text-surface font-medium text-sm
                          hover:bg-primary-hover transition-colors cursor-pointer"
@@ -266,8 +267,8 @@ export function ChatView() {
         </div>
 
         {/* Input at the bottom even in welcome */}
-        <ChatInput onSend={(text) => {
-          const id = createConversation();
+        <ChatInput onSend={async (text) => {
+          const id = await createConversation();
           setTimeout(() => handleSend(text, id), 0);
         }} />
       </div>

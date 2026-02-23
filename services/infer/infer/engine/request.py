@@ -51,6 +51,7 @@ class InferRequest:
 
     # ── Identity ─────────────────────────────────────────────────────
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    conversation_id: str = ""
 
     # ── Input ────────────────────────────────────────────────────────
     input_ids: list[int] = field(default_factory=list)
@@ -67,6 +68,11 @@ class InferRequest:
     finish_reason: str | None = None
     created_at: float = field(default_factory=time.time)
     cancelled: bool = False
+
+    # ── KV cache slot binding ────────────────────────────────────────
+    # Set by the engine when a KV cache slot is acquired for this request.
+    kv_slot: object | None = None  # KVSlot (avoid circular import)
+    prefix_len: int = 0  # Number of prompt tokens already in KV cache
 
     # ── Result delivery channel ──────────────────────────────────────
     # Consumers ``await output.get()`` to receive StreamToken objects.

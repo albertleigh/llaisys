@@ -7,7 +7,38 @@
 import type { ChatCompletionChunk, ChatCompletionRequestBody, ChatCompletionResponse } from "../types";
 
 const ENDPOINT = "/v1/chat/completions";
+const CONVERSATIONS_ENDPOINT = "/v1/conversations";
 const DEFAULT_MODEL = "deepseek-r1-distill-qwen-1.5b";
+
+// ── Conversation management ────────────────────────────────────────────────
+
+/**
+ * Ask the server to create a new conversation and return its id.
+ * The returned id must be sent with every chat/completions request
+ * in the same thread so the server can match and reuse the KV cache.
+ */
+export async function createServerConversation(): Promise<string> {
+  const res = await fetch(CONVERSATIONS_ENDPOINT, { method: "POST" });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "unknown error");
+    throw new Error(`Failed to create conversation (${res.status}): ${text}`);
+  }
+  const data = (await res.json()) as { conversation_id: string };
+  return data.conversation_id;
+}
+
+/**
+ * Tell the server to delete a conversation and free its KV-cache memory.
+ */
+export async function deleteServerConversation(conversationId: string): Promise<void> {
+  const res = await fetch(`${CONVERSATIONS_ENDPOINT}/${conversationId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "unknown error");
+    console.warn(`Failed to delete server conversation (${res.status}): ${text}`);
+  }
+}
 
 export interface ChatRequestOptions {
   messages: { role: string; content: string }[];
@@ -17,6 +48,7 @@ export interface ChatRequestOptions {
   topP?: number;
   topK?: number;
   signal?: AbortSignal;
+  conversationId: string;
 }
 
 // ── Non-streaming ──────────────────────────────────────────────────────────
@@ -25,11 +57,12 @@ export async function chatCompletion(opts: ChatRequestOptions): Promise<ChatComp
   const body: ChatCompletionRequestBody = {
     model: opts.model ?? DEFAULT_MODEL,
     messages: opts.messages,
-    max_tokens: opts.maxTokens ?? 256,
+    max_tokens: opts.maxTokens ?? 4096,
     temperature: opts.temperature ?? 0.8,
     top_p: opts.topP ?? 0.8,
     top_k: opts.topK ?? 50,
     stream: false,
+    conversation_id: opts.conversationId,
   };
 
   const res = await fetch(ENDPOINT, {
@@ -59,11 +92,12 @@ export async function* chatCompletionStream(
   const body: ChatCompletionRequestBody = {
     model: opts.model ?? DEFAULT_MODEL,
     messages: opts.messages,
-    max_tokens: opts.maxTokens ?? 512,
+    max_tokens: opts.maxTokens ?? 4096,
     temperature: opts.temperature ?? 0.8,
     top_p: opts.topP ?? 0.8,
     top_k: opts.topK ?? 50,
     stream: true,
+    conversation_id: opts.conversationId,
   };
 
   const res = await fetch(ENDPOINT, {

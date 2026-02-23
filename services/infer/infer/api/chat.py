@@ -20,6 +20,7 @@ from ..schemas import (
     ChatCompletionChunk,
     Choice,
     ChoiceMessage,
+    CreateConversationResponse,
     DeltaMessage,
     ModelList,
     ModelObject,
@@ -50,6 +51,26 @@ async def pool_status(request: Request):
     engine = _get_engine(request)
     return engine.pool_stats()
 
+# ── /v1/conversations ────────────────────────────────────────────────────
+
+@router.post("/conversations", response_model=CreateConversationResponse)
+async def create_conversation():
+    """Create a new conversation and return its id.
+
+    The returned ``conversation_id`` must be sent with every subsequent
+    ``/v1/chat/completions`` request in the same conversation thread so
+    the server can match and reuse the KV cache.
+    """
+    return CreateConversationResponse()
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: str, request: Request):
+    """Delete a conversation and free its KV-cache memory."""
+    engine = _get_engine(request)
+    freed = engine.delete_conversation(conversation_id)
+    return {"conversation_id": conversation_id, "slots_freed": freed}
+
 
 # ── /v1/chat/completions ─────────────────────────────────────────────────────
 
@@ -57,6 +78,7 @@ async def pool_status(request: Request):
 async def chat_completions(body: ChatCompletionRequest, request: Request):
     engine = _get_engine(request)
     messages = [m.model_dump() for m in body.messages]
+    conversation_id = body.conversation_id
 
     if body.stream:
         # Create the request up-front so we can cancel it if the
@@ -68,6 +90,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
             top_p=body.top_p,
             temperature=body.temperature,
             stream=True,
+            conversation_id=conversation_id,
         )
         return EventSourceResponse(
             _stream_generator(engine, body, infer_req, request),
@@ -75,13 +98,27 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
         )
 
     # ── Non-streaming ────────────────────────────────────────────────
-    completion_ids, text, prompt_len = await engine.generate(
+    infer_req = engine.make_request(
         messages,
         max_tokens=body.max_tokens,
         top_k=body.top_k,
         top_p=body.top_p,
         temperature=body.temperature,
+        conversation_id=conversation_id,
     )
+
+    texts: list[str] = []
+    while True:
+        token: StreamToken = await infer_req.output.get()
+        if token.error:
+            raise RuntimeError(token.error)
+        texts.append(token.text)
+        if token.is_final:
+            break
+
+    completion_text = "".join(texts)
+    completion_ids = infer_req.generated_ids
+    prompt_len = infer_req.prompt_len
 
     finish_reason = "stop"
     if len(completion_ids) >= body.max_tokens:
@@ -91,7 +128,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
         model=body.model,
         choices=[
             Choice(
-                message=ChoiceMessage(content=text),
+                message=ChoiceMessage(content=completion_text),
                 finish_reason=finish_reason,
             )
         ],
@@ -100,6 +137,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
             completion_tokens=len(completion_ids),
             total_tokens=prompt_len + len(completion_ids),
         ),
+        conversation_id=conversation_id,
     )
 
 
@@ -117,12 +155,14 @@ async def _stream_generator(
     cancelled so the inference loop can skip remaining work.
     """
     chunk_id = f"chatcmpl-{infer_req.id}"
+    conv_id = infer_req.conversation_id
 
-    # First chunk: role announcement
+    # First chunk: role announcement.
     first = ChatCompletionChunk(
         id=chunk_id,
         model=body.model,
         choices=[StreamChoice(delta=DeltaMessage(role="assistant"))],
+        conversation_id=conv_id,
     )
     yield json.dumps(first.model_dump(), ensure_ascii=False)
 
@@ -159,6 +199,7 @@ async def _stream_generator(
                         finish_reason=token.finish_reason,
                     )
                 ],
+                conversation_id=conv_id,
             )
             yield json.dumps(chunk.model_dump(), ensure_ascii=False)
 

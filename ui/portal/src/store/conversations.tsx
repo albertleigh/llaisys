@@ -25,7 +25,8 @@ import type {
   ConversationId,
   MessageId,
 } from "../types";
-import { newConversationId, newMessageId } from "../types";
+import { newMessageId } from "../types";
+import { createServerConversation, deleteServerConversation } from "../api";
 
 // ── Persisted state shape ──────────────────────────────────────────────────
 
@@ -74,8 +75,10 @@ export interface ConversationStore {
   /** Currently active conversation object (convenience derived value). */
   activeConversation: Conversation | null;
 
-  /** Create a new empty conversation and make it active. Returns its id. */
-  createConversation: () => ConversationId;
+  /** Create a new empty conversation (server-assigned id) and make it active. */
+  createConversation: () => Promise<ConversationId>;
+  /** Insert a conversation with a known id (used internally). */
+  insertConversation: (id: ConversationId) => void;
   /** Switch to an existing conversation (or null to deselect). */
   setActive: (id: ConversationId | null) => void;
   /** Delete a conversation. If it was active, activates the next one. */
@@ -122,8 +125,7 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
 
   // ── Conversation CRUD ──────────────────────────────────────────────────
 
-  const createConversation = useCallback((): ConversationId => {
-    const id = newConversationId();
+  const insertConversation = useCallback((id: ConversationId) => {
     const now = Date.now();
     const conv: Conversation = {
       id,
@@ -136,14 +138,22 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
       conversations: [conv, ...prev.conversations],
       activeId: id,
     }));
-    return id;
   }, []);
+
+  const createConversation = useCallback(async (): Promise<ConversationId> => {
+    const serverId = await createServerConversation();
+    const id = serverId as ConversationId;
+    insertConversation(id);
+    return id;
+  }, [insertConversation]);
 
   const setActive = useCallback((id: ConversationId | null) => {
     setState((prev) => ({ ...prev, activeId: id }));
   }, []);
 
   const deleteConversation = useCallback((id: ConversationId) => {
+    // Fire-and-forget: tell the server to free KV-cache memory.
+    void deleteServerConversation(id);
     setState((prev) => {
       const remaining = prev.conversations.filter((c) => c.id !== id);
       const activeId = prev.activeId === id ? (remaining[0]?.id ?? null) : prev.activeId;
@@ -233,6 +243,7 @@ export function ConversationProvider({ children }: { children: ReactNode }) {
     activeId: state.activeId,
     activeConversation,
     createConversation,
+    insertConversation,
     setActive,
     deleteConversation,
     renameConversation,

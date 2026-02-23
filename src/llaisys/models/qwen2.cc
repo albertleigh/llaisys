@@ -313,4 +313,124 @@ int64_t llaisysQwen2ModelInfer(LlaisysQwen2Model *model, int64_t *token_ids, siz
 
     return next_token;
 }
+
+// --- KV Cache API ---
+
+size_t llaisysQwen2ModelGetPos(LlaisysQwen2Model *model) {
+    return model->pos;
+}
+
+void llaisysQwen2ModelSetPos(LlaisysQwen2Model *model, size_t pos) {
+    model->pos = pos;
+}
+
+void llaisysQwen2ModelResetKVCache(LlaisysQwen2Model *model) {
+    model->pos = 0;
+    llaisysDataType_t dtype = static_cast<llaisysDataType_t>(model->meta.dtype);
+    for (size_t i = 0; i < model->meta.nlayer; ++i) {
+        std::vector<int64_t> cache_shape = {
+            static_cast<int64_t>(model->meta.maxseq),
+            static_cast<int64_t>(model->meta.nkvh),
+            static_cast<int64_t>(model->meta.dh)};
+        model->k_cache[i] = zeros(cache_shape, dtype, model->device_type);
+        model->v_cache[i] = zeros(cache_shape, dtype, model->device_type);
+    }
+}
+
+static constexpr uint64_t QWEN2_KV_SNAPSHOT_MAGIC = 0x4C4C41495359534BuLL; // "LLAISYSK"
+
+struct LlaisysQwen2KVSnapshot {
+    uint64_t magic;  // must equal QWEN2_KV_SNAPSHOT_MAGIC
+    size_t pos;      // number of tokens stored
+    size_t nlayer;
+    // CPU tensors of shape [pos, nkvh, dh] — only the used portion
+    std::vector<tensor_t> k_data;
+    std::vector<tensor_t> v_data;
+};
+
+LlaisysQwen2KVSnapshot_t llaisysQwen2ModelSaveKV(LlaisysQwen2Model *model) {
+    auto snap = new LlaisysQwen2KVSnapshot();
+    snap->magic = QWEN2_KV_SNAPSHOT_MAGIC;
+    snap->pos = model->pos;
+    snap->nlayer = model->meta.nlayer;
+
+    if (model->pos == 0) {
+        // Nothing to snapshot — leave vectors empty
+        snap->k_data.resize(model->meta.nlayer, nullptr);
+        snap->v_data.resize(model->meta.nlayer, nullptr);
+        return reinterpret_cast<LlaisysQwen2KVSnapshot_t>(snap);
+    }
+
+    for (size_t i = 0; i < model->meta.nlayer; ++i) {
+        // Slice the first `pos` rows out of the [maxseq, nkvh, dh] cache
+        tensor_t k_slice = model->k_cache[i]->slice(0, 0, model->pos);
+        tensor_t v_slice = model->v_cache[i]->slice(0, 0, model->pos);
+
+        // Copy to CPU (contiguous + device→host copy handled by Tensor::to)
+        tensor_t cpu_k = k_slice->to(LLAISYS_DEVICE_CPU);
+        tensor_t cpu_v = v_slice->to(LLAISYS_DEVICE_CPU);
+
+        snap->k_data.push_back(cpu_k);
+        snap->v_data.push_back(cpu_v);
+    }
+
+    return reinterpret_cast<LlaisysQwen2KVSnapshot_t>(snap);
+}
+
+void llaisysQwen2ModelLoadKV(LlaisysQwen2Model *model, LlaisysQwen2KVSnapshot_t snapshot) {
+    auto snap = reinterpret_cast<LlaisysQwen2KVSnapshot *>(snapshot);
+    if (!snap) return;
+    if (snap->magic != QWEN2_KV_SNAPSHOT_MAGIC) {
+        fprintf(stderr, "llaisysQwen2ModelLoadKV: invalid snapshot (bad magic 0x%llx)\n",
+                (unsigned long long)snap->magic);
+        return;
+    }
+
+    model->pos = snap->pos;
+
+    if (snap->pos == 0) return;
+
+    for (size_t i = 0; i < snap->nlayer && i < model->meta.nlayer; ++i) {
+        if (!snap->k_data[i] || !snap->v_data[i]) continue;
+
+        size_t row_bytes = model->meta.nkvh * model->meta.dh
+                         * model->k_cache[i]->elementSize();
+        size_t copy_bytes = snap->pos * row_bytes;
+
+        if (model->device_type == LLAISYS_DEVICE_CPU) {
+            // CPU→CPU
+            std::memcpy(model->k_cache[i]->data(),
+                        snap->k_data[i]->data(), copy_bytes);
+            std::memcpy(model->v_cache[i]->data(),
+                        snap->v_data[i]->data(), copy_bytes);
+        } else {
+            // CPU→Device
+            core::context().setDevice(model->device_type, 0);
+            core::context().runtime().api()->memcpy_sync(
+                model->k_cache[i]->data(),
+                snap->k_data[i]->data(),
+                copy_bytes, LLAISYS_MEMCPY_H2D);
+            core::context().runtime().api()->memcpy_sync(
+                model->v_cache[i]->data(),
+                snap->v_data[i]->data(),
+                copy_bytes, LLAISYS_MEMCPY_H2D);
+        }
+    }
+}
+
+size_t llaisysQwen2KVSnapshotGetPos(LlaisysQwen2KVSnapshot_t snapshot) {
+    auto snap = reinterpret_cast<LlaisysQwen2KVSnapshot *>(snapshot);
+    if (!snap) return 0;
+    if (snap->magic != QWEN2_KV_SNAPSHOT_MAGIC) return 0;
+    return snap->pos;
+}
+
+void llaisysQwen2KVSnapshotDestroy(LlaisysQwen2KVSnapshot_t snapshot) {
+    auto snap = reinterpret_cast<LlaisysQwen2KVSnapshot *>(snapshot);
+    if (snap && snap->magic != QWEN2_KV_SNAPSHOT_MAGIC) {
+        fprintf(stderr, "llaisysQwen2KVSnapshotDestroy: invalid snapshot (bad magic)\n");
+        return;
+    }
+    delete snap;  // shared_ptrs in vectors auto-release CPU memory
+}
 }

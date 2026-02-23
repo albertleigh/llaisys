@@ -52,3 +52,11 @@ curl http://localhost:8000/v1/chat/completions \
 ### GET /v1/models
 
 List available models.
+
+### POST /v1/conversations
+
+Create a new conversation. Returns a `conversation_id` that must be sent with every subsequent chat completion request in the same thread.
+
+### DELETE /v1/conversations/{conversation_id}
+
+Delete a conversation and free its KV-cache memory on the server.

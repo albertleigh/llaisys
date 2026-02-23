@@ -60,3 +60,26 @@ def load_qwen2(lib):
 
     lib.llaisysQwen2ModelInfer.argtypes = [llaisysQwen2Model_t, ctypes.POINTER(ctypes.c_int64), ]
     lib.llaisysQwen2ModelInfer.restype = ctypes.c_int64
+
+    # --- KV Cache API ---
+
+    lib.llaisysQwen2ModelGetPos.argtypes = [llaisysQwen2Model_t]
+    lib.llaisysQwen2ModelGetPos.restype = c_size_t
+
+    lib.llaisysQwen2ModelSetPos.argtypes = [llaisysQwen2Model_t, c_size_t]
+    lib.llaisysQwen2ModelSetPos.restype = None
+
+    lib.llaisysQwen2ModelResetKVCache.argtypes = [llaisysQwen2Model_t]
+    lib.llaisysQwen2ModelResetKVCache.restype = None
+
+    lib.llaisysQwen2ModelSaveKV.argtypes = [llaisysQwen2Model_t]
+    lib.llaisysQwen2ModelSaveKV.restype = c_void_p  # LlaisysQwen2KVSnapshot_t
+
+    lib.llaisysQwen2ModelLoadKV.argtypes = [llaisysQwen2Model_t, c_void_p]
+    lib.llaisysQwen2ModelLoadKV.restype = None
+
+    lib.llaisysQwen2KVSnapshotGetPos.argtypes = [c_void_p]
+    lib.llaisysQwen2KVSnapshotGetPos.restype = c_size_t
+
+    lib.llaisysQwen2KVSnapshotDestroy.argtypes = [c_void_p]
+    lib.llaisysQwen2KVSnapshotDestroy.restype = None

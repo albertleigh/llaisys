@@ -36,6 +36,7 @@ export interface ChatCompletionRequestBody {
   top_p: number;
   top_k: number;
   stream: boolean;
+  conversation_id: string;
 }
 
 export interface ChatCompletionChoice {
@@ -57,6 +58,7 @@ export interface ChatCompletionResponse {
   model: string;
   choices: ChatCompletionChoice[];
   usage: ChatCompletionUsage;
+  conversation_id: string;
 }
 
 /** A single SSE chunk from the streaming endpoint. */
@@ -70,4 +72,5 @@ export interface ChatCompletionChunk {
     delta: { role?: string; content?: string };
     finish_reason: string | null;
   }[];
+  conversation_id: string;
 }

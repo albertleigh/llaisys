@@ -200,6 +200,55 @@ class Qwen2:
         if hasattr(self, 'model_handle') and self.model_handle:
             LIB_LLAISYS.llaisysQwen2ModelDestroy(self.model_handle)
 
+    # --- KV Cache API ---
+
+    def get_pos(self) -> int:
+        """Get the current sequence position (number of tokens processed so far)."""
+        return LIB_LLAISYS.llaisysQwen2ModelGetPos(self.model_handle)
+
+    def set_pos(self, pos: int):
+        """Set the current sequence position."""
+        LIB_LLAISYS.llaisysQwen2ModelSetPos(self.model_handle, ctypes.c_size_t(pos))
+
+    def reset_kv_cache(self):
+        """Reset all KV caches to zero and reset position to 0."""
+        LIB_LLAISYS.llaisysQwen2ModelResetKVCache(self.model_handle)
+
+    def save_kv_state(self):
+        """Snapshot the current KV cache to CPU (host) memory.
+
+        Returns an opaque snapshot handle (``c_void_p``).  The model's
+        device KV caches remain valid — call ``reset_kv_cache()``
+        afterwards to free device memory.
+
+        The snapshot must eventually be freed with ``free_kv_snapshot()``.
+        """
+        return LIB_LLAISYS.llaisysQwen2ModelSaveKV(self.model_handle)
+
+    def restore_kv_state(self, snapshot):
+        """Restore a snapshot (host memory) back into the model's device KV caches.
+
+        Parameters
+        ----------
+        snapshot
+            An opaque handle returned by ``save_kv_state()``.
+        """
+        LIB_LLAISYS.llaisysQwen2ModelLoadKV(self.model_handle, snapshot)
+
+    def free_kv_snapshot(self, snapshot):
+        """Free the CPU memory held by a KV cache snapshot.
+
+        After this call the *snapshot* handle is invalid.
+        """
+        if snapshot:
+            LIB_LLAISYS.llaisysQwen2KVSnapshotDestroy(snapshot)
+
+    def get_snapshot_pos(self, snapshot) -> int:
+        """Return the token position stored inside a snapshot."""
+        if not snapshot:
+            return 0
+        return LIB_LLAISYS.llaisysQwen2KVSnapshotGetPos(snapshot)
+
     def generate(
             self,
             inputs: Sequence[int],

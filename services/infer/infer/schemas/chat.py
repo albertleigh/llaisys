@@ -23,6 +23,14 @@ class ChatCompletionRequest(BaseModel):
     top_p: float = Field(default=0.8, ge=0.0, le=1.0)
     top_k: int = Field(default=50, ge=1)
     stream: bool = False
+    conversation_id: str = Field(
+        ...,
+        description=(
+            "Conversation identifier obtained from POST /v1/conversations. "
+            "All messages in the same conversation thread must use the "
+            "same conversation_id so the server can reuse the KV cache."
+        ),
+    )
 
 
 # ── Non-streaming response ──────────────────────────────────────────────────
@@ -51,6 +59,7 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[Choice]
     usage: Usage
+    conversation_id: str = ""
 
 
 # ── Streaming (SSE) response chunks ─────────────────────────────────────────
@@ -72,9 +81,17 @@ class ChatCompletionChunk(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: list[StreamChoice]
+    conversation_id: str = ""
 
 
 # ── /v1/models ───────────────────────────────────────────────────────────────
+
+class CreateConversationResponse(BaseModel):
+    """Returned by POST /v1/conversations."""
+    conversation_id: str = Field(
+        default_factory=lambda: uuid.uuid4().hex[:16],
+        description="Unique conversation identifier to be used in subsequent chat requests.",
+    )
 
 class ModelObject(BaseModel):
     id: str
