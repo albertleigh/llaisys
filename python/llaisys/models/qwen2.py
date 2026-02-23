@@ -220,6 +220,35 @@ class Qwen2:
         tokens = list(int(t) for t in inputs)
         return self._infer_dialog(tokens, max_new_tokens)
 
+    def infer_step(self, tokens: Sequence[int]) -> int:
+        """Run a single inference step.
+
+        Parameters
+        ----------
+        tokens:
+            On the *first* call pass the full prompt token IDs.
+            On subsequent calls pass a single-element list containing
+            the last generated token (the KV cache retains context).
+
+        Returns
+        -------
+        int
+            The next predicted token ID.
+        """
+        in_len = len(tokens)
+        c_in_buf = (ctypes.c_int64 * in_len)(*tokens)
+        buf_ptr = ctypes.cast(c_in_buf, ctypes.POINTER(ctypes.c_int64))
+        # print(f"[model:qwen2] input: {in_len}", flush=True)
+        # t0 = time.time()
+        next_token = LIB_LLAISYS.llaisysQwen2ModelInfer(
+            self.model_handle,
+            buf_ptr,
+            ctypes.c_size_t(in_len),
+        )
+        # dt = time.time() - t0
+        # print(f"[model:qwen2] generate eclipse: {dt * 1e3} ms", flush=True)
+        return next_token
+
     def _infer_dialog(self, tokens: Sequence[int], max_steps: int) -> List[int]:
         if max_steps is None:
             max_steps = 1
@@ -233,21 +262,8 @@ class Qwen2:
         print(f"[Debug] Vocab Size: {self.meta.voc}")
 
         for step in range(max_steps):
-            # populate the model
-            in_len = len(next_input_tokens)
+            next_token = self.infer_step(next_input_tokens)
 
-            c_in_buf = (ctypes.c_int64 * in_len)(*next_input_tokens)
-            buf_ptr = ctypes.cast(c_in_buf, ctypes.POINTER(ctypes.c_int64))
-            t0 = time.time()
-
-            # infer: return the next token ID
-            next_token = LIB_LLAISYS.llaisysQwen2ModelInfer(
-                self.model_handle,
-                buf_ptr,
-                ctypes.c_size_t(in_len)
-            )
-
-            dt = time.time() - t0
             full_response.append(next_token)
 
             if next_token == self.meta.end_token:

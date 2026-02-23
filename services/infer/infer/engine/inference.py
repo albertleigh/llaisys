@@ -1,8 +1,18 @@
-"""Inference engine — wraps llaisys.models.Qwen2 + HuggingFace tokenizer."""
+"""Inference engine — wraps llaisys.models.Qwen2 + HuggingFace tokenizer.
+
+This module integrates with :class:`RequestPool` and
+:class:`BatchScheduler` so that multiple callers can submit inference
+requests concurrently.  A background ``asyncio.Task`` continuously
+pulls batches from the pool, runs them through the C backend (one
+inference step at a time), and delivers tokens to each caller via
+per-request ``asyncio.Queue`` channels.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Sequence
@@ -11,6 +21,11 @@ from transformers import AutoTokenizer
 
 import llaisys
 
+from .pool import RequestPool
+from .request import InferRequest, RequestStatus, StreamToken
+from .scheduler import BatchScheduler
+
+logger = logging.getLogger(__name__)
 
 # Map CLI device names to llaisys enum values
 _DEVICE_MAP = {
@@ -22,13 +37,28 @@ if hasattr(llaisys.DeviceType, "NVIDIA"):
 
 
 class InferenceEngine:
-    """Thin async wrapper around the synchronous llaisys C backend.
+    """Async inference engine backed by a request pool and batch scheduler.
 
-    All blocking C calls are dispatched to a thread-pool via
-    ``asyncio.to_thread`` so the FastAPI event loop stays responsive.
+    Lifecycle
+    ---------
+    1. ``__init__``  — load model + tokenizer, create pool & scheduler.
+    2. ``await start()`` — launch the background inference loop.
+    3. ``submit(request)`` — enqueue an :class:`InferRequest`.
+       The caller then reads from ``request.output`` to get tokens.
+    4. ``await stop()``  — cancel the background loop on shutdown.
+
+    The old ``generate()`` / ``generate_stream()`` convenience methods
+    are still available — they now go through the pool internally.
     """
 
-    def __init__(self, model_path: str | Path, device: str = "cpu", max_ctx_len: int = 2048):
+    def __init__(
+        self,
+        model_path: str | Path,
+        device: str = "cpu",
+        max_ctx_len: int = 2048,
+        max_batch_size: int = 1,
+        max_pool_size: int = 128,
+    ):
         self.model_path = Path(model_path).resolve()
         self.device_enum = _DEVICE_MAP.get(device, llaisys.DeviceType.CPU)
 
@@ -44,7 +74,41 @@ class InferenceEngine:
             max_ctx_len=max_ctx_len,
         )
 
-        self._lock = asyncio.Lock()  # serialise inference (single model instance)
+        # ── Request pool & scheduler ────────────────────────────────
+        self.pool = RequestPool(max_size=max_pool_size)
+        self.scheduler = BatchScheduler(
+            self.pool, max_batch_size=max_batch_size
+        )
+
+        # ── Background loop state ──────────────────────────────────
+        self._loop_task: asyncio.Task | None = None
+        self._running = False
+
+    # ── Lifecycle ────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        """Launch the background inference loop."""
+        if self._running:
+            return
+        self._running = True
+        self._loop_task = asyncio.create_task(
+            self._inference_loop(), name="inference-loop"
+        )
+        logger.info(
+            "Inference loop started (max_batch=%d)", self.scheduler.max_batch_size
+        )
+
+    async def stop(self) -> None:
+        """Cancel the background loop and wait for it to finish."""
+        self._running = False
+        if self._loop_task is not None:
+            self._loop_task.cancel()
+            try:
+                await self._loop_task
+            except asyncio.CancelledError:
+                pass
+            self._loop_task = None
+        logger.info("Inference loop stopped")
 
     # ── Tokenisation helpers ─────────────────────────────────────────
 
@@ -60,26 +124,166 @@ class InferenceEngine:
     def decode(self, token_ids: Sequence[int], *, skip_special: bool = True) -> str:
         return self.tokenizer.decode(token_ids, skip_special_tokens=skip_special)
 
-    # ── Synchronous generation (runs in thread) ─────────────────────
+    # ── Submit a request ─────────────────────────────────────────────
 
-    def _generate_sync(
+    def submit(self, request: InferRequest) -> InferRequest:
+        """Add a request to the pool.
+
+        Returns the same request object whose ``output`` queue the
+        caller should read from.
+
+        Raises
+        ------
+        RuntimeError
+            If the pool is full.
+        """
+        if not self.pool.add(request):
+            raise RuntimeError(
+                f"Request pool is full ({self.pool._max_size}); "
+                "try again later."
+            )
+        return request
+
+    def make_request(
         self,
-        input_ids: list[int],
-        max_new_tokens: int,
-        top_k: int,
-        top_p: float,
-        temperature: float,
-    ) -> list[int]:
-        """Call the C model — returns full token sequence (prompt + completion)."""
-        return self.model.generate(
-            input_ids,
-            max_new_tokens=max_new_tokens,
+        messages: list[dict],
+        *,
+        max_tokens: int = 256,
+        top_k: int = 50,
+        top_p: float = 0.8,
+        temperature: float = 0.8,
+        stream: bool = False,
+    ) -> InferRequest:
+        """Create an :class:`InferRequest` from chat messages and submit it."""
+        input_ids = self._apply_chat_template(messages)
+        req = InferRequest(
+            input_ids=input_ids,
+            prompt_len=len(input_ids),
+            max_tokens=max_tokens,
             top_k=top_k,
             top_p=top_p,
             temperature=temperature,
+            stream=stream,
         )
+        return self.submit(req)
 
-    # ── Async non-streaming ──────────────────────────────────────────
+    # ── Background inference loop ────────────────────────────────────
+
+    async def _inference_loop(self) -> None:
+        """Continuously pull batches from the pool and process them.
+
+        This is the heart of the serving system.  It runs as a single
+        ``asyncio.Task`` for the lifetime of the server.
+        """
+        logger.info("Inference loop running …")
+        try:
+            while self._running:
+                batch = await self.scheduler.wait_and_form_batch()
+                logger.info(
+                    "Processing batch of %d request(s)  "
+                    "[pool pending=%d, active=%d]",
+                    len(batch),
+                    self.pool.pending_count,
+                    self.pool.active_count,
+                )
+                await self._process_batch(batch)
+        except asyncio.CancelledError:
+            logger.info("Inference loop cancelled")
+            raise
+
+    async def _process_batch(self, batch: list[InferRequest]) -> None:
+        """Process a batch of requests.
+
+        **Current behaviour** (single KV-cache in C backend):
+        Each request is processed to completion sequentially.  This is
+        safe and correct, and the pool / scheduler infrastructure is
+        fully exercised.
+
+        **Future upgrade path** (per-request KV caches + batched matmul):
+        Replace the sequential loop with true iteration-level batching::
+
+            while batch:
+                tokens = batched_infer_step(batch)   # one step, all reqs
+                for req, tok in zip(batch, tokens):
+                    deliver(req, tok)
+                    if req.is_done: batch.remove(req)
+                # Optionally pull new requests from pool between iters
+        """
+        for request in batch:
+            await self._process_single_request(request)
+
+    async def _process_single_request(self, request: InferRequest) -> None:
+        """Run step-by-step inference for one request.
+
+        Each C-level inference step is offloaded to a thread so the
+        event loop stays responsive.  Tokens are delivered to the
+        caller's ``request.output`` queue via ``call_soon_threadsafe``
+        so they arrive the instant they are generated (true streaming).
+        """
+        loop = asyncio.get_running_loop()
+        end_token = self.model.meta.end_token
+        tokenizer = self.tokenizer  # HuggingFace tokenizer (Rust, thread-safe)
+
+        def _run_generation() -> None:
+            """Blocking function executed in the thread pool."""
+            next_input = list(request.input_ids)
+
+            for step in range(request.max_tokens):
+                # ── Check cancellation ───────────────────────────────
+                if request.cancelled:
+                    st = StreamToken(text="", finish_reason="stop")
+                    loop.call_soon_threadsafe(request.output.put_nowait, st)
+                    return
+
+                # ── Single inference step (C backend) ────────────────
+                token_id = self.model.infer_step(next_input)
+                request.generated_ids.append(token_id)
+
+                is_end = token_id == end_token
+                is_last = step == request.max_tokens - 1
+
+                # ── Decode & deliver ─────────────────────────────────
+                if is_end:
+                    token_text = ""
+                    finish = "stop"
+                else:
+                    token_text = tokenizer.decode(
+                        [token_id], skip_special_tokens=False
+                    )
+                    finish = "length" if is_last else None
+
+                st = StreamToken(text=token_text, finish_reason=finish)
+                loop.call_soon_threadsafe(request.output.put_nowait, st)
+
+                if is_end or is_last:
+                    return
+
+                # Next step feeds only the new token
+                next_input = [token_id]
+
+        try:
+            await asyncio.to_thread(_run_generation)
+            request.finish_reason = (
+                "stop"
+                if (
+                    request.generated_ids
+                    and request.generated_ids[-1] == end_token
+                )
+                else "length"
+            )
+        except Exception as e:
+            logger.exception("Error processing request %s", request.id)
+            err = StreamToken(error=str(e))
+            try:
+                request.output.put_nowait(err)
+            except Exception:
+                pass
+        finally:
+            self.pool.mark_completed(request)
+
+    # ── Convenience wrappers (backward-compatible) ───────────────────
+    # These go through the pool so they benefit from queuing &
+    # scheduling even when called directly.
 
     async def generate(
         self,
@@ -89,25 +293,27 @@ class InferenceEngine:
         top_p: float = 0.8,
         temperature: float = 0.8,
     ) -> tuple[list[int], str, int]:
-        """Return (completion_tokens, text, prompt_token_count)."""
-        input_ids = self._apply_chat_template(messages)
-        prompt_len = len(input_ids)
+        """Non-streaming generation.  Returns ``(completion_ids, text, prompt_len)``."""
+        req = self.make_request(
+            messages,
+            max_tokens=max_tokens,
+            top_k=top_k,
+            top_p=top_p,
+            temperature=temperature,
+            stream=False,
+        )
 
-        async with self._lock:
-            all_ids = await asyncio.to_thread(
-                self._generate_sync,
-                input_ids,
-                max_tokens,
-                top_k,
-                top_p,
-                temperature,
-            )
+        texts: list[str] = []
+        while True:
+            token: StreamToken = await req.output.get()
+            if token.error:
+                raise RuntimeError(token.error)
+            texts.append(token.text)
+            if token.is_final:
+                break
 
-        completion_ids = all_ids[prompt_len:]
-        text = self.decode(completion_ids)
-        return completion_ids, text, prompt_len
-
-    # ── Async streaming (token-by-token) ─────────────────────────────
+        completion_text = "".join(texts)
+        return req.generated_ids, completion_text, req.prompt_len
 
     async def generate_stream(
         self,
@@ -117,41 +323,30 @@ class InferenceEngine:
         top_p: float = 0.8,
         temperature: float = 0.8,
     ) -> AsyncGenerator[tuple[str, str | None], None]:
-        """Yield (token_text, finish_reason | None) one token at a time.
+        """Yield ``(token_text, finish_reason)`` one token at a time."""
+        req = self.make_request(
+            messages,
+            max_tokens=max_tokens,
+            top_k=top_k,
+            top_p=top_p,
+            temperature=temperature,
+            stream=True,
+        )
 
-        For now this wraps the full-sequence generation and replays it
-        token-by-token. Once the C backend exposes a step-level API we
-        can swap in true streaming without changing the HTTP layer.
-        """
-        input_ids = self._apply_chat_template(messages)
-        prompt_len = len(input_ids)
-
-        async with self._lock:
-            all_ids = await asyncio.to_thread(
-                self._generate_sync,
-                input_ids,
-                max_tokens,
-                top_k,
-                top_p,
-                temperature,
-            )
-
-        completion_ids = all_ids[prompt_len:]
-        end_token = self.model.meta.end_token
-
-        for i, tid in enumerate(completion_ids):
-            is_last = i == len(completion_ids) - 1
-            is_stop = tid == end_token
-
-            token_text = self.decode([tid], skip_special=False)
-            if is_stop:
-                yield "", "stop"
+        while True:
+            token: StreamToken = await req.output.get()
+            if token.error:
+                raise RuntimeError(token.error)
+            yield token.text, token.finish_reason
+            if token.is_final:
                 return
-            elif is_last:
-                yield token_text, "length"
-                return
-            else:
-                yield token_text, None
 
-            # Small yield to keep the event loop responsive during replay
-            await asyncio.sleep(0)
+    # ── Pool diagnostics ─────────────────────────────────────────────
+
+    def pool_stats(self) -> dict:
+        """Return a snapshot of pool + scheduler statistics."""
+        return {
+            **self.pool.stats(),
+            "max_batch_size": self.scheduler.max_batch_size,
+            "loop_running": self._running,
+        }

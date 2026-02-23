@@ -39,11 +39,20 @@ async def lifespan(app: FastAPI):
         model_path=model_path,
         device=cfg.device,
         max_ctx_len=cfg.max_ctx_len,
+        max_batch_size=cfg.max_batch_size,
+        max_pool_size=cfg.max_pool_size,
     )
     app.state.engine = engine
-    print(f"[infer] Model ready — serving at http://{cfg.host}:{cfg.port}")
+
+    # Start the background inference loop
+    await engine.start()
+    print(
+        f"[infer] Model ready — serving at http://{cfg.host}:{cfg.port}  "
+        f"(batch_size={cfg.max_batch_size}, pool_size={cfg.max_pool_size})"
+    )
     yield
-    # Cleanup: Python GC will call model.__del__
+    # Stop the inference loop and clean up
+    await engine.stop()
     print("[infer] Shutting down.")
 
 
@@ -114,6 +123,14 @@ def cli():
     parser.add_argument("--host", default=settings.host)
     parser.add_argument("--port", type=int, default=settings.port)
     parser.add_argument("--max-ctx-len", type=int, default=settings.max_ctx_len)
+    parser.add_argument(
+        "--max-batch-size", type=int, default=settings.max_batch_size,
+        help="Max requests per batch (keep 1 until C backend supports batched KV)",
+    )
+    parser.add_argument(
+        "--max-pool-size", type=int, default=settings.max_pool_size,
+        help="Max pending requests in pool",
+    )
     args = parser.parse_args()
 
     cfg = Settings(
@@ -122,6 +139,8 @@ def cli():
         host=args.host,
         port=args.port,
         max_ctx_len=args.max_ctx_len,
+        max_batch_size=args.max_batch_size,
+        max_pool_size=args.max_pool_size,
     )
     application = create_app(cfg)
     uvicorn.run(application, host=cfg.host, port=cfg.port)

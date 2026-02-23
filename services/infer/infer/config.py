@@ -21,6 +21,17 @@ class Settings(BaseSettings):
         default=2048,
         description="Maximum context length for KV cache allocation.",
     )
+    max_batch_size: int = Field(
+        default=1,
+        description=(
+            "Maximum number of requests processed per batch iteration. "
+            "Keep at 1 until the C backend supports per-request KV caches."
+        ),
+    )
+    max_pool_size: int = Field(
+        default=128,
+        description="Maximum number of pending requests in the pool.",
+    )
     host: str = Field(default="0.0.0.0", description="Bind host.")
     port: int = Field(default=8000, description="Bind port.")
     model_name: str = Field(
