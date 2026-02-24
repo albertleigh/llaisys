@@ -11,6 +11,7 @@
 
 #include "../../ops/add/op.hpp"
 #include "../../ops/argmax/op.hpp"
+#include "../../ops/sample/op.hpp"
 #include "../../ops/embedding/op.hpp"
 #include "../../ops/linear/op.hpp"
 #include "../../ops/rms_norm/op.hpp"
@@ -137,7 +138,8 @@ LlaisysQwen2Weights *llaisysQwen2ModelWeights(struct LlaisysQwen2Model *model) {
     return &model->weights;
 }
 
-int64_t llaisysQwen2ModelInfer(LlaisysQwen2Model *model, int64_t *token_ids, size_t ntoken) {
+int64_t llaisysQwen2ModelInfer(LlaisysQwen2Model *model, int64_t *token_ids, size_t ntoken,
+                              float temperature, int top_k, float top_p) {
     if (ntoken == 0) {
         return -1;
     }
@@ -292,20 +294,16 @@ int64_t llaisysQwen2ModelInfer(LlaisysQwen2Model *model, int64_t *token_ids, siz
     tensor_t logits = create_tensor({1, static_cast<int64_t>(model->meta.voc)}, hidden_states->dtype(), model->device_type);
     ops::linear(logits, last_token_emb, model->t(model->weights.out_embed), nullptr);
 
-    tensor_t max_idx = create_tensor({1}, LLAISYS_DTYPE_I64, model->device_type);
-    tensor_t max_val = create_tensor({1}, hidden_states->dtype(), model->device_type);
-
-    ops::argmax(max_idx, max_val, logits);
-
     int64_t next_token;
-    if (model->device_type == LLAISYS_DEVICE_CPU) {
-        next_token = *reinterpret_cast<int64_t *>(max_idx->data());
+    if (temperature <= 0.0f || top_k == 1) {
+        // Greedy: use the dedicated argmax kernel (faster than sample's greedy path)
+        tensor_t max_idx = create_tensor({1}, LLAISYS_DTYPE_I64, model->device_type);
+        tensor_t max_val = create_tensor({1}, logits->dtype(), model->device_type);
+        ops::argmax(max_idx, max_val, logits);
+        max_idx = max_idx->to(LLAISYS_DEVICE_CPU);
+        next_token = *reinterpret_cast<const int64_t *>(max_idx->data());
     } else {
-        core::context().setDevice(model->device_type, 0);
-        // Synchronize the stream before reading result back to host
-        core::context().runtime().synchronize();
-        core::context().runtime().api()->memcpy_sync(
-            &next_token, max_idx->data(), sizeof(int64_t), LLAISYS_MEMCPY_D2H);
+        next_token = ops::sample(logits, temperature, top_k, top_p);
     }
 
     // Update global position

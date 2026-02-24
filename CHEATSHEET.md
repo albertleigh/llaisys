@@ -24,6 +24,7 @@ https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl.html
     xmake f -m debug
     xmake f -m debug --nv-gpu=y
     xmake f -m release --nv-gpu=y
+    xmake f -m release --nv-gpu=n --mkl=y
     xmake f -m release --nv-gpu=y --mkl=y
     xmake
     xmake install

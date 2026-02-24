@@ -267,10 +267,18 @@ class Qwen2:
             raise ValueError("inputs must be a non-empty sequence of token ids")
 
         tokens = list(int(t) for t in inputs)
-        return self._infer_dialog(tokens, max_new_tokens)
+        return self._infer_dialog(tokens, max_new_tokens,
+                                  temperature=temperature,
+                                  top_k=top_k, top_p=top_p)
 
-    def infer_step(self, tokens: Sequence[int]) -> int:
-        """Run a single inference step.
+    def infer_step(
+        self,
+        tokens: Sequence[int],
+        temperature: float = 0.0,
+        top_k: int = 1,
+        top_p: float = 1.0,
+    ) -> int:
+        """Run a single inference step with sampling.
 
         Parameters
         ----------
@@ -278,6 +286,14 @@ class Qwen2:
             On the *first* call pass the full prompt token IDs.
             On subsequent calls pass a single-element list containing
             the last generated token (the KV cache retains context).
+        temperature:
+            Softmax temperature.  ``<= 0`` or ``top_k == 1`` → greedy
+            (argmax).
+        top_k:
+            Keep only the *K* highest-probability tokens before sampling.
+            ``<= 0`` disables the filter.
+        top_p:
+            Nucleus (top-p) probability threshold.  ``>= 1.0`` disables.
 
         Returns
         -------
@@ -287,18 +303,24 @@ class Qwen2:
         in_len = len(tokens)
         c_in_buf = (ctypes.c_int64 * in_len)(*tokens)
         buf_ptr = ctypes.cast(c_in_buf, ctypes.POINTER(ctypes.c_int64))
-        # print(f"[model:qwen2] input: {in_len}", flush=True)
-        # t0 = time.time()
         next_token = LIB_LLAISYS.llaisysQwen2ModelInfer(
             self.model_handle,
             buf_ptr,
             ctypes.c_size_t(in_len),
+            ctypes.c_float(temperature),
+            ctypes.c_int(top_k),
+            ctypes.c_float(top_p),
         )
-        # dt = time.time() - t0
-        # print(f"[model:qwen2] generate eclipse: {dt * 1e3} ms", flush=True)
         return next_token
 
-    def _infer_dialog(self, tokens: Sequence[int], max_steps: int) -> List[int]:
+    def _infer_dialog(
+        self,
+        tokens: Sequence[int],
+        max_steps: int,
+        temperature: float = 0.0,
+        top_k: int = 1,
+        top_p: float = 1.0,
+    ) -> List[int]:
         if max_steps is None:
             max_steps = 1
 
@@ -311,7 +333,12 @@ class Qwen2:
         print(f"[Debug] Vocab Size: {self.meta.voc}")
 
         for step in range(max_steps):
-            next_token = self.infer_step(next_input_tokens)
+            next_token = self.infer_step(
+                next_input_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+            )
 
             full_response.append(next_token)
 

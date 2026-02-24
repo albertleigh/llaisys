@@ -331,7 +331,12 @@ class InferenceEngine:
                     return
 
                 # ── Single inference step (C backend) ────────────────
-                token_id = self.model.infer_step(next_input)
+                token_id = self.model.infer_step(
+                    next_input,
+                    temperature=request.temperature,
+                    top_k=request.top_k,
+                    top_p=request.top_p,
+                )
                 request.generated_ids.append(token_id)
                 all_tokens.append(token_id)
 
