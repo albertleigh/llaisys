@@ -1,5 +1,5 @@
 from ctypes import POINTER, c_uint8, c_void_p, c_size_t, c_ssize_t, c_int
-from .llaisys_types import llaisysDataType_t, llaisysDeviceType_t
+from .llaisys_types import llaisysDataType_t, llaisysDeviceType_t, DataType
 
 # Handle type
 llaisysTensor_t = c_void_p
@@ -76,3 +76,21 @@ def load_tensor(lib):
         c_size_t,  # end  : exclusive
     ]
     lib.tensorSlice.restype = llaisysTensor_t
+
+
+def dtype_str_to_enum(s: str) -> int:
+    s = s.lower()
+    mapping = {
+        "float32": DataType.F32,
+        "float": DataType.F32,
+        "float16": DataType.F16,
+        "half": DataType.F16,
+        "bfloat16": DataType.BF16,
+        "int64": DataType.I64,
+        "long": DataType.I64,
+        "int32": DataType.I32,
+        "int": DataType.I32,
+    }
+    if s in mapping:
+        return mapping[s].value
+    return DataType.F32.value
