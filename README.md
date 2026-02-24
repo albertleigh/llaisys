@@ -209,47 +209,76 @@ with other architectures such as PyTorch.
 ## Keypoints
 
 ### Tensor & Core Infrastructure
-- Implemented tensor class with `view`, `permute`, `slice`, `load`, and contiguity checks, supporting shared storage and arbitrary strides
-- Built a device-agnostic runtime abstraction via function-pointer tables (`LlaisysRuntimeAPI`), enabling the same codebase to target CPU and NVIDIA GPUs
-- Implemented a best-fit caching allocator (analogous to PyTorch's CUDA caching allocator) that pools freed blocks and reuses them via `lower_bound` lookup, avoiding repeated device malloc/free overhead
+
+- Implemented tensor class with `view`, `permute`, `slice`, `load`, and contiguity checks, supporting shared storage and
+  arbitrary strides
+- Built a device-agnostic runtime abstraction via function-pointer tables (`LlaisysRuntimeAPI`), enabling the same
+  codebase to target CPU and NVIDIA GPUs
+- Implemented a best-fit caching allocator (analogous to PyTorch's CUDA caching allocator) that pools freed blocks and
+  reuses them via `lower_bound` lookup, avoiding repeated device malloc/free overhead
 
 ### CPU Operators & Optimization
-- Implemented all 8 operators (argmax, embedding, linear, rms_norm, rope, self_attention, swiglu, rearrange) with F32/F16/BF16 support
+
+- Implemented all 8 operators (argmax, embedding, linear, rms_norm, rope, self_attention, swiglu, rearrange) with
+  F32/F16/BF16 support
 - Integrated OpenMP for multi-threaded parallelism and SIMD hints (`OMP_SIMD`) across operators
-- Integrated Intel MKL (`cblas_sgemm`, `cblas_hgemm`, `cblas_gemm_bf16bf16f32`) and OpenBLAS for accelerated GEMM, with fallback to a cache-blocked OpenMP GEMM (32×64×256 blocks) when MKL is unavailable
+- Integrated Intel MKL (`cblas_sgemm`, `cblas_hgemm`, `cblas_gemm_bf16bf16f32`) and OpenBLAS for accelerated GEMM, with
+  fallback to a cache-blocked OpenMP GEMM (32×64×256 blocks) when MKL is unavailable
 - Cross-platform support — handled MSVC's lack of `collapse(2)` in OpenMP with flattened parallel-for workarounds
 
 ### CUDA Operators
+
 - Ported all operators to CUDA with custom kernels for element-wise and reduction operations
-- **Argmax**: hierarchical reduction (warp-level `__shfl_down_sync` → shared memory → cross-block) with a single-pass multi-block strategy using `__threadfence()` + `atomicInc` last-block pattern — avoids a second kernel launch for large inputs
-- **Linear**: used cuBLASLt with a plan cache keyed by `(M, K, N, dtype, has_bias)` to eliminate setup overhead for the 197 repeating GEMM shapes (7 linears × 28 layers + logits), plus fused bias epilogue via `CUBLASLT_EPILOGUE_BIAS`
-- **Self-Attention**: dual-path — cuBLAS batched GEMM with custom causal-softmax kernel for large heads, and a fused online-softmax kernel (running max + running sum without materializing the score matrix) for small sizes. GQA handled via stride broadcasting
-- **Sample**: Temperature/Top-K/Top-P (nucleus) sampling with CUB `DeviceRadixSort::SortPairsDescending` (O(N) radix sort with pre-allocated temp storage), on-device softmax with zero host syncs, and minimal D2H transfer. Benchmarks beat PyTorch across all configurations on 151K vocab
+- **Argmax**: hierarchical reduction (warp-level `__shfl_down_sync` → shared memory → cross-block) with a single-pass
+  multi-block strategy using `__threadfence()` + `atomicInc` last-block pattern — avoids a second kernel launch for
+  large inputs
+- **Linear**: used cuBLASLt with a plan cache keyed by `(M, K, N, dtype, has_bias)` to eliminate setup overhead for the
+  197 repeating GEMM shapes (7 linears × 28 layers + logits), plus fused bias epilogue via `CUBLASLT_EPILOGUE_BIAS`
+- **Self-Attention**: dual-path — cuBLAS batched GEMM with custom causal-softmax kernel for large heads, and a fused
+  online-softmax kernel (running max + running sum without materializing the score matrix) for small sizes. GQA handled
+  via stride broadcasting
+- **Sample**: Temperature/Top-K/Top-P (nucleus) sampling with CUB `DeviceRadixSort::SortPairsDescending` (O(N) radix
+  sort with pre-allocated temp storage), on-device softmax with zero host syncs, and minimal D2H transfer. Benchmarks
+  beat PyTorch across all configurations on 151K vocab
 
 ### Model Inference
-- Implemented Qwen2 (DeepSeek-R1-Distill-Qwen-1.5B) end-to-end in C++ with KV cache, achieving identical output to PyTorch's HuggingFace reference at 1.6× faster wall time (3.28s vs 5.13s)
+
+- Implemented Qwen2 (DeepSeek-R1-Distill-Qwen-1.5B) end-to-end in C++ with KV cache, achieving identical output to
+  PyTorch's HuggingFace reference at 1.6× faster wall time (3.28s vs 5.13s)
 - Greedy path uses dedicated argmax kernel; stochastic path uses the full sample op pipeline
 
 ### Inference Service
-- Built a FastAPI server with OpenAI-compatible `POST /v1/chat/completions` endpoint supporting both streaming (SSE with token-by-token delivery) and non-streaming modes
-- Implemented a KV cache pool with prefix matching — slot acquisition prioritizes longest prefix match, then empty slots, then LRU eviction. Only one KV cache lives on device at a time (swap in/out)
-- Streaming uses `asyncio.to_thread()` for the blocking C backend with `loop.call_soon_threadsafe()` for real-time token delivery
+
+- Built a FastAPI server with OpenAI-compatible `POST /v1/chat/completions` endpoint supporting both streaming (SSE with
+  token-by-token delivery) and non-streaming modes
+- Implemented a KV cache pool with prefix matching — slot acquisition prioritizes longest prefix match, then empty
+  slots, then LRU eviction. Only one KV cache lives on device at a time (swap in/out)
+- Streaming uses `asyncio.to_thread()` for the blocking C backend with `loop.call_soon_threadsafe()` for real-time token
+  delivery
 - Conversation lifecycle management with `POST/DELETE /v1/conversations` endpoints for KV cache cleanup
 
 ### Chat UI (React + TypeScript)
-- Built a React SPA with Vite, featuring a sidebar for conversation management (create, rename, delete), real-time streaming display via `appendToken`, and localStorage persistence
+
+- Built a React SPA with Vite, featuring a sidebar for conversation management (create, rename, delete), real-time
+  streaming display via `appendToken`, and localStorage persistence
 - Integrated with the inference server's SSE streaming for live token-by-token rendering
 
 ### Build System
-- Structured xmake build with modular `.lua` configs per device (`cpu.lua`, `nvidia.lua`), automatic venv/symlink setup (`pylib.lua`, `infer.lua`), and frontend node_modules management (`portal.lua`)
+
+- Structured xmake build with modular `.lua` configs per device (`cpu.lua`, `nvidia.lua`), automatic venv/symlink
+  setup (`pylib.lua`, `infer.lua`), and frontend node_modules management (`portal.lua`)
 - Conditional CUDA compilation via `ENABLE_NVIDIA_API` macro, vcpkg integration for C++ dependencies
 
 ## Drawbacks
+
 - Kernels process only single sequences — no batched inference across multiple requests in parallel on GPU
 - Did not have the devices to develop upon clusters using NCCL/NVLink for multi-GPU or distributed inference
-- Self-attention uses custom causal-softmax + cuBLAS GEMM, not FlashAttention — memory and compute efficiency falls behind for long sequences
-- KV cache pool swaps entire states between host and device — no paged/block-level KV management (e.g. vLLM-style PagedAttention)
+- Self-attention uses custom causal-softmax + cuBLAS GEMM, not FlashAttention — memory and compute efficiency falls
+  behind for long sequences
+- KV cache pool swaps entire states between host and device — no paged/block-level KV management (e.g. vLLM-style
+  PagedAttention)
 - No tensor parallelism or pipeline parallelism — the model runs on a single device
-- No quantization support (e.g. INT8/INT4/GPTQ/AWQ) — model must fit in full BF16, limiting deployment to GPUs with enough memory
+- No quantization support (e.g. INT8/INT4/GPTQ/AWQ) — model must fit in full BF16, limiting deployment to GPUs with
+  enough memory
 - No speculative decoding or other latency-reduction techniques for autoregressive generation
 - No continuous batching — the server processes one request at a time, blocking subsequent requests
