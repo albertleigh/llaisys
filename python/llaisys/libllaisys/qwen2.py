@@ -17,14 +17,6 @@ class LlaisysQwen2Meta(ctypes.Structure):
         ("epsilon", c_float),
         ("theta", c_float),
         ("end_token", c_int64),
-        ("attention_dropout", c_float),
-        ("initializer_range", c_float),
-        ("max_window_layers", c_size_t),
-        ("sliding_window", c_size_t),
-        ("tie_word_embeddings", c_int),
-        ("use_cache", c_int),
-        ("use_mrope", c_int),
-        ("use_sliding_window", c_int),
     ]
 
 

@@ -31,7 +31,7 @@ class Qwen2:
         self.meta.nkvh = self.config["num_key_value_heads"]
         self.meta.dh = self.meta.hs // self.meta.nh
         self.meta.di = self.config["intermediate_size"]
-        self.meta.maxseq = self.config["max_position_embeddings"]
+        self.meta.maxseq = min(self.config["max_position_embeddings"], 4096)
         self.meta.voc = self.config["vocab_size"]
         self.meta.epsilon = self.config["rms_norm_eps"]
         self.meta.theta = self.config.get("rope_theta", 1000000.0)
@@ -76,7 +76,9 @@ class Qwen2:
         raise ValueError(f"Unsupported torch dtype: {dtype}")
 
     @staticmethod
-    def _torch_to_llaisys_tensor(tensor: torch.Tensor, device: DeviceType) -> Tensor:
+    def _torch_to_llaisys_tensor(tensor: torch.Tensor, device: DeviceType):
+        """Create a C-side tensor handle and load data from a torch tensor.
+        Returns the raw llaisysTensor_t handle (c_void_p)."""
         cpu_tensor = tensor.detach().cpu().contiguous()
 
         if cpu_tensor.is_floating_point():
@@ -87,7 +89,6 @@ class Qwen2:
 
         llaisys_dtype = Qwen2._torch_dtype_to_llaisys(cpu_tensor.dtype)
 
-        # 1. create tensor handler using C API
         shape = tuple(cpu_tensor.shape)
         c_shape = (ctypes.c_size_t * len(shape))(*shape)
 
@@ -101,18 +102,9 @@ class Qwen2:
         if not handle:
             raise RuntimeError("Failed to allocate tensor")
 
-        # 2. New Tensor instance
-        llaisys_tensor = Tensor(shape)
-        llaisys_tensor.handle = handle
-        llaisys_tensor.dtype = llaisys_dtype
+        LIB_LLAISYS.tensorLoad(handle, cpu_tensor.numpy().ctypes.data_as(ctypes.c_void_p))
 
-        # 3. Load tensor data into Tensor instance
-        if cpu_tensor.dtype == torch.bfloat16:
-            LIB_LLAISYS.tensorLoad(handle, ctypes.c_void_p(cpu_tensor.data_ptr()))
-        else:
-            LIB_LLAISYS.tensorLoad(handle, cpu_tensor.numpy().ctypes.data_as(ctypes.c_void_p))
-
-        return llaisys_tensor
+        return handle
 
     def _load_weights(self):
         weights_c = LIB_LLAISYS.llaisysQwen2ModelWeights(self.model_handle).contents
@@ -135,8 +127,7 @@ class Qwen2:
             with safetensors.safe_open(f_path, framework="pt") as f:
                 pt_tensor = f.get_tensor(name)
 
-            t = self._torch_to_llaisys_tensor(pt_tensor, self.device)
-            return t.handle
+            return self._torch_to_llaisys_tensor(pt_tensor, self.device)
 
         # Assign weights
         weights_c.in_embed = load("model.embed_tokens.weight")
