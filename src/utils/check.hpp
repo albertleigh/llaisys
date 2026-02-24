@@ -86,3 +86,9 @@
             }                                                    \
         }                                                        \
     } while (0)
+
+#define EXCEPTION_INVALID_ARGUMENT(MSG__)                                                     \
+    do {                                                                                      \
+        std::cerr << "[ERROR] Invalid argument: " << MSG__ << EXCEPTION_LOCATION_MSG << '\n'; \
+        throw std::invalid_argument(MSG__);                                                   \
+    } while (0)
