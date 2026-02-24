@@ -3,6 +3,7 @@ import sys
 import ctypes
 from pathlib import Path
 
+from .qwen2 import load_qwen2
 from .runtime import load_runtime
 from .runtime import LlaisysRuntimeAPI
 from .llaisys_types import llaisysDeviceType_t, DeviceType
@@ -38,7 +39,7 @@ LIB_LLAISYS = load_shared_library()
 load_runtime(LIB_LLAISYS)
 load_tensor(LIB_LLAISYS)
 load_ops(LIB_LLAISYS)
-
+load_qwen2(LIB_LLAISYS)
 
 __all__ = [
     "LIB_LLAISYS",
