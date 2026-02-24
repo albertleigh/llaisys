@@ -1,14 +1,14 @@
 #include "runtime.hpp"
 
 #include "../../device/runtime_api.hpp"
-#include "../allocator/naive_allocator.hpp"
+#include "../allocator/caching_allocator.hpp"
 
 namespace llaisys::core {
 Runtime::Runtime(llaisysDeviceType_t device_type, int device_id)
     : _device_type(device_type), _device_id(device_id), _is_active(false) {
     _api = llaisys::device::getRuntimeAPI(_device_type);
     _stream = _api->create_stream();
-    _allocator = new allocators::NaiveAllocator(_api);
+    _allocator = new allocators::CachingAllocator(_api);
 }
 
 Runtime::~Runtime() {

@@ -26,7 +26,8 @@ __pycache__/
 cache/
 
 # JSON
-*.json
+compile_commands.json
+!vcpkg.json
 
 #GGUF
 *.gguf
@@ -88,3 +89,9 @@ htmlcov/
 Thumbs.db
 ehthumbs.db
 desktop.ini
+
+/models
+/vcpkg_installed
+
+# Frontend
+node_modules

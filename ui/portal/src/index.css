@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+/*
+ * LLAISYS Portal – Global theme
+ * Uses Tailwind v4 with CSS-first configuration.
+ */
+
+@theme {
+  --color-surface: #1e1e2e;
+  --color-surface-alt: #181825;
+  --color-surface-hover: #313244;
+  --color-border: #45475a;
+  --color-text: #cdd6f4;
+  --color-text-dim: #a6adc8;
+  --color-primary: #89b4fa;
+  --color-primary-hover: #74c7ec;
+  --color-accent: #a6e3a1;
+  --color-danger: #f38ba8;
+  --color-user-bubble: #313244;
+  --color-assistant-bubble: #1e1e2e;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-dim);
+}
+
+/* Typing cursor animation for streaming */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.cursor-blink::after {
+  content: "▎";
+  animation: blink 1s step-end infinite;
+  color: var(--color-primary);
+}
