@@ -32,7 +32,7 @@
 #else
 // GCC / Clang: full OpenMP 4.5+ support
 #  define OMP_PARALLEL_FOR              _Pragma("omp parallel for")
-#  define OMP_PARALLEL_FOR_SCHED(s)     _Pragma("omp parallel for simd schedule(static)")
+#  define OMP_PARALLEL_FOR_SCHED(s)     _Pragma("omp parallel for schedule(static)")
 #  define OMP_PARALLEL_FOR_SIMD         _Pragma("omp parallel for simd")
 #  define OMP_PARALLEL_FOR_SIMD_SCHED(s) _Pragma("omp parallel for simd schedule(static)")
 #  define OMP_PARALLEL_FOR_COLLAPSE2    _Pragma("omp parallel for collapse(2)")

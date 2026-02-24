@@ -196,6 +196,24 @@ target("llaisys")
         end)
     end
 
+    -- OpenMP runtime: clang uses libomp, GCC uses libgomp
+    local is_clang_tc = (get_config("toolchain") or ""):find("clang") ~= nil
+    local omp_rt = is_clang_tc and "omp" or "gomp"
+
+    -- When using clang on Linux, the libomp-<ver>-dev package may not match
+    -- the clang version.  Search common LLVM directories so the linker can
+    -- find libomp.so even when it is not on the default search path.
+    if is_clang_tc and not is_plat("windows") then
+        for _, ver in ipairs({"19", "18", "17", "16", "15", "14"}) do
+            local llvm_lib = "/usr/lib/llvm-" .. ver .. "/lib"
+            if os.isfile(path.join(llvm_lib, "libomp.so")) then
+                add_linkdirs(llvm_lib)
+                add_rpathdirs(llvm_lib)
+                break
+            end
+        end
+    end
+
     -- BLAS linking
     if has_config("mkl") then
         -- Intel MKL linking
@@ -207,7 +225,7 @@ target("llaisys")
         if not is_plat("windows") then
             local mkl_lib = path.join(mkl_root, "lib", "intel64")
             add_ldflags("-fopenmp")
-            add_syslinks("gomp")
+            add_syslinks(omp_rt)
 
             add_linkdirs(mkl_lib)
             add_rpathdirs(mkl_lib)
@@ -233,7 +251,7 @@ target("llaisys")
 
         if not is_plat("windows") then
             add_ldflags("-fopenmp")
-            add_syslinks("gomp")
+            add_syslinks(omp_rt)
 
             add_linkdirs(vcpkg_lib)
 

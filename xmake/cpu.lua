@@ -29,6 +29,9 @@ target("llaisys-ops-cpu")
         add_cxflags("-fPIC", "-Wno-unknown-pragmas")
         add_cxflags("-fopenmp")
         add_ldflags("-fopenmp")
+        -- Clang emits -Wpass-failed when it cannot vectorize an omp simd loop;
+        -- GCC silently ignores this flag, so it is safe to add unconditionally.
+        add_cxflags("-Wno-pass-failed", {force = true})
     else
         add_cxflags("/openmp")
     end
