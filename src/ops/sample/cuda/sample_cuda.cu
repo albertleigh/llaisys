@@ -9,12 +9,12 @@
 // Sampling path:
 //   1. GPU: convert logits to float + temperature scale  (element-wise)
 //   2. GPU: softmax  (max-reduce → exp → sum-reduce → normalise)
-//   3. D2H: copy probability vector to host  (~600 KB for 150K vocab)
-//   4. Host: Top-K filter → Top-P filter → multinomial draw
-//
-// Steps 1–2 exploit GPU parallelism for the heavy lifting.
-// Steps 3–4 are fast on the host because Top-K/Top-P and a single
-// random draw are inherently sequential and the data fits in L2.
+//          All on-device — no host sync during softmax.
+//   3. GPU: CUB radix sort (probabilities descending + indices)
+//   4. D2H: copy sorted probabilities to host
+//          (only top-K entries when top_k is set, full vector otherwise)
+//   5. Host: Top-K cutoff → Top-P cumsum cutoff → multinomial draw
+//   6. D2H: fetch the one original index of the sampled position
 //
 
 #include "sample_cuda.cuh"
@@ -22,6 +22,8 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+
+#include <cub/device/device_radix_sort.cuh>
 
 #ifdef _MSC_VER
 #include <cfloat>
@@ -34,8 +36,6 @@
 #include "../../../cuda_utils/types.cuh"
 #include "../../../utils.hpp"
 
-#include <algorithm>
-#include <numeric>
 #include <random>
 #include <vector>
 
@@ -45,6 +45,12 @@ namespace {
 static std::mt19937 &host_rng() {
     thread_local std::mt19937 rng(std::random_device{}());
     return rng;
+}
+
+// ── Cached host buffer (avoids heap alloc per call) ─────────────────────────
+static std::vector<float> &host_probs_buf() {
+    thread_local std::vector<float> buf;
+    return buf;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -99,7 +105,7 @@ __global__ void greedy_argmax_kernel(int64_t *out_idx,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  Softmax helper kernels
+//  Softmax helper kernels — read scalars from device memory (no host sync)
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Convert any supported type to float + multiply by inv_temperature.
@@ -124,10 +130,13 @@ __global__ void reduce_max(float *out, const float *v, size_t n) {
     if (tid == 0) *out = sd[0];
 }
 
-// exp(x − max_val)  element-wise.
-__global__ void exp_sub(float *v, size_t n, float max_val) {
+// exp(v[i] − *d_max).  Reads max from device via shared-memory broadcast.
+__global__ void exp_sub(float *v, size_t n, const float *d_max) {
+    __shared__ float mx;
+    if (threadIdx.x == 0) mx = *d_max;
+    __syncthreads();
     size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) v[i] = expf(v[i] - max_val);
+    if (i < n) v[i] = expf(v[i] - mx);
 }
 
 // Single-block sum-reduce.
@@ -145,30 +154,63 @@ __global__ void reduce_sum(float *out, const float *v, size_t n) {
     if (tid == 0) *out = sd[0];
 }
 
-// v[i] /= *sum_ptr  element-wise.
-__global__ void div_by(float *v, size_t n, float inv_sum) {
+// v[i] *= (1 / *d_sum).  Reads sum from device via shared-memory broadcast.
+__global__ void div_by_sum(float *v, size_t n, const float *d_sum) {
+    __shared__ float inv;
+    if (threadIdx.x == 0) {
+        float s = *d_sum;
+        inv = (s > 0.0f) ? 1.0f / s : 0.0f;
+    }
+    __syncthreads();
     size_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) v[i] *= inv_sum;
+    if (i < n) v[i] *= inv;
+}
+
+// Fill indices with [0, 1, 2, …, n-1].
+__global__ void iota_kernel(int64_t *out, size_t n) {
+    size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = static_cast<int64_t>(i);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  Persistent workspace
 // ═══════════════════════════════════════════════════════════════════════════
 struct SampleWorkspace {
-    float   *probs   = nullptr;  // [vocab_size]
-    float   *scalar  = nullptr;  // single float (max or sum)
-    int64_t *d_out   = nullptr;  // device result for greedy path
-    size_t   cap     = 0;
+    float   *probs          = nullptr;  // [cap]  probabilities (sort input)
+    float   *probs_sorted   = nullptr;  // [cap]  sorted probabilities (sort output)
+    float   *scalar         = nullptr;  // single float (max or sum)
+    int64_t *d_out          = nullptr;  // device result for greedy path
+    int64_t *indices        = nullptr;  // [cap]  original-index permutation (sort input)
+    int64_t *indices_sorted = nullptr;  // [cap]  sorted indices (sort output)
+    void    *cub_temp       = nullptr;  // CUB temp storage
+    size_t   cub_temp_bytes = 0;
+    size_t   cap            = 0;
 
     void ensure(size_t n) {
         if (n <= cap) return;
-        if (probs)  cudaFree(probs);
-        if (scalar) cudaFree(scalar);
-        if (d_out)  cudaFree(d_out);
+        if (probs)          cudaFree(probs);
+        if (probs_sorted)   cudaFree(probs_sorted);
+        if (scalar)         cudaFree(scalar);
+        if (d_out)          cudaFree(d_out);
+        if (indices)        cudaFree(indices);
+        if (indices_sorted) cudaFree(indices_sorted);
+        if (cub_temp)       cudaFree(cub_temp);
         cap = n;
-        CUDA_CHECK(cudaMalloc(&probs,  cap * sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&scalar, sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&d_out,  sizeof(int64_t)));
+        CUDA_CHECK(cudaMalloc(&probs,          cap * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&probs_sorted,   cap * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&scalar,         sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_out,          sizeof(int64_t)));
+        CUDA_CHECK(cudaMalloc(&indices,        cap * sizeof(int64_t)));
+        CUDA_CHECK(cudaMalloc(&indices_sorted, cap * sizeof(int64_t)));
+
+        // Query CUB for required temp storage size, then allocate
+        cub_temp_bytes = 0;
+        cub::DeviceRadixSort::SortPairsDescending(
+            nullptr, cub_temp_bytes,
+            probs, probs_sorted,
+            indices, indices_sorted,
+            static_cast<int>(cap));
+        CUDA_CHECK(cudaMalloc(&cub_temp, cub_temp_bytes));
     }
 };
 
@@ -220,84 +262,84 @@ int64_t launch_sample(const T *logits, size_t vocab_size,
         w.probs, logits, vocab_size, inv_t);
     CUDA_CHECK(cudaGetLastError());
 
-    // ── 2. Softmax on device ────────────────────────────────────────────────
-    // Reduction block size — power-of-2, ≤ 1024
+    // ── 2. Softmax on device (no host syncs) ────────────────────────────────
     unsigned int rbs = 1;
     while (rbs < vocab_size && rbs < 1024) rbs <<= 1;
     if (rbs > 1024) rbs = 1024;
 
-    //  a) max-reduce
     reduce_max<<<1, rbs, rbs * sizeof(float), stream>>>(
         w.scalar, w.probs, vocab_size);
     CUDA_CHECK(cudaGetLastError());
-    float h_max;
-    CUDA_CHECK(cudaMemcpyAsync(&h_max, w.scalar, sizeof(float),
-                               cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    //  b) exp(x − max)
-    exp_sub<<<grid, BLK, 0, stream>>>(w.probs, vocab_size, h_max);
+    exp_sub<<<grid, BLK, 0, stream>>>(w.probs, vocab_size, w.scalar);
     CUDA_CHECK(cudaGetLastError());
 
-    //  c) sum-reduce
     reduce_sum<<<1, rbs, rbs * sizeof(float), stream>>>(
         w.scalar, w.probs, vocab_size);
     CUDA_CHECK(cudaGetLastError());
-    float h_sum;
-    CUDA_CHECK(cudaMemcpyAsync(&h_sum, w.scalar, sizeof(float),
-                               cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    //  d) normalise
-    float inv_sum = (h_sum > 0.0f) ? 1.0f / h_sum : 0.0f;
-    div_by<<<grid, BLK, 0, stream>>>(w.probs, vocab_size, inv_sum);
+    div_by_sum<<<grid, BLK, 0, stream>>>(w.probs, vocab_size, w.scalar);
     CUDA_CHECK(cudaGetLastError());
 
-    // ── 3. D2H copy probabilities ───────────────────────────────────────────
-    std::vector<float> h_probs(vocab_size);
-    CUDA_CHECK(cudaMemcpyAsync(h_probs.data(), w.probs,
-                               vocab_size * sizeof(float),
+    // ── 3. GPU sort: CUB radix sort descending (probs + indices) ────────────
+    iota_kernel<<<grid, BLK, 0, stream>>>(w.indices, vocab_size);
+    CUDA_CHECK(cudaGetLastError());
+
+    cub::DeviceRadixSort::SortPairsDescending(
+        w.cub_temp, w.cub_temp_bytes,
+        w.probs, w.probs_sorted,
+        w.indices, w.indices_sorted,
+        static_cast<int>(vocab_size),
+        0, 32,   // begin_bit, end_bit for float
+        stream);
+    CUDA_CHECK(cudaGetLastError());
+
+    // ── 4. D2H copy sorted probabilities ────────────────────────────────────
+    // When top_k is set, only the first K entries matter.
+    size_t copy_n = vocab_size;
+    if (top_k > 0 && static_cast<size_t>(top_k) < vocab_size)
+        copy_n = static_cast<size_t>(top_k);
+
+    auto &hbuf = host_probs_buf();
+    hbuf.resize(copy_n);
+    CUDA_CHECK(cudaMemcpyAsync(hbuf.data(), w.probs_sorted,
+                               copy_n * sizeof(float),
                                cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    // ── 4. Host-side Top-K + Top-P + draw ───────────────────────────────────
-    std::vector<int64_t> indices(vocab_size);
-    std::iota(indices.begin(), indices.end(), int64_t(0));
-
-    // Top-K
-    if (top_k > 0 && static_cast<size_t>(top_k) < vocab_size) {
-        std::partial_sort(
-            indices.begin(),
-            indices.begin() + static_cast<ptrdiff_t>(top_k),
-            indices.end(),
-            [&](int64_t a, int64_t b) { return h_probs[a] > h_probs[b]; });
-        for (size_t i = static_cast<size_t>(top_k); i < vocab_size; ++i)
-            h_probs[indices[i]] = 0.0f;
-        float norm = 0.0f;
-        for (auto p : h_probs) norm += p;
-        if (norm > 0.0f) for (auto &p : h_probs) p /= norm;
-    }
-
-    // Top-P
+    // ── 5. Host: Top-K / Top-P cutoff → multinomial draw ────────────────────
+    // Probs are already sorted descending, so top-K is implicit (copy_n).
+    // Top-P: scan until cumulative mass exceeds top_p.
+    size_t effective = copy_n;
     if (top_p > 0.0f && top_p < 1.0f) {
-        std::sort(indices.begin(), indices.end(),
-                  [&](int64_t a, int64_t b) { return h_probs[a] > h_probs[b]; });
         float cum = 0.0f;
-        size_t cutoff = vocab_size;
-        for (size_t i = 0; i < vocab_size; ++i) {
-            cum += h_probs[indices[i]];
-            if (cum > top_p) { cutoff = i + 1; break; }
+        for (size_t i = 0; i < effective; ++i) {
+            cum += hbuf[i];
+            if (cum > top_p) { effective = i + 1; break; }
         }
-        for (size_t i = cutoff; i < vocab_size; ++i)
-            h_probs[indices[i]] = 0.0f;
-        float norm = 0.0f;
-        for (auto p : h_probs) norm += p;
-        if (norm > 0.0f) for (auto &p : h_probs) p /= norm;
     }
 
-    // Multinomial draw
-    std::discrete_distribution<int64_t> dist(h_probs.begin(), h_probs.end());
-    return dist(host_rng());
+    // Multinomial draw over the effective candidates
+    float total = 0.0f;
+    for (size_t i = 0; i < effective; ++i) total += hbuf[i];
+
+    std::uniform_real_distribution<float> udist(0.0f, total);
+    float u = udist(host_rng());
+
+    size_t sampled_pos = effective > 0 ? effective - 1 : 0;
+    float running = 0.0f;
+    for (size_t i = 0; i < effective; ++i) {
+        running += hbuf[i];
+        if (running >= u) { sampled_pos = i; break; }
+    }
+
+    // ── 6. Fetch the original vocab index for the sampled position ──────────
+    int64_t result;
+    CUDA_CHECK(cudaMemcpyAsync(&result, w.indices_sorted + sampled_pos,
+                               sizeof(int64_t),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+    return result;
 }
 
 } // namespace
